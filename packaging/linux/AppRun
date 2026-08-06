@@ -1,0 +1,5 @@
+#!/bin/sh
+set -eu
+
+APP_ROOT="${APPDIR:-$(dirname "$(readlink -f "$0")")}"
+exec "$APP_ROOT/usr/lib/chronophoto/Chronophoto" "$@"
