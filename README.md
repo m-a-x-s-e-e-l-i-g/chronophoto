@@ -78,16 +78,24 @@ your own footage first.
 - Connect poses with **Photographic stretch** or **Dense cloned copies**, or
   leave smear appearance set to **None** for distinct poses.
 - Pinch or two-finger scroll to zoom around the pointer, then drag to pan.
-- Stack keyframed opacity, saturation, blur, JPEG, stippling, dithering, and
-  halftone effects across the subject's motion.
-- Export full-resolution PNG, TIFF, or JPEG files.
+- Apply opacity, Photoshop-style blend modes, saturation, blur, JPEG,
+  stippling, dithering, and halftone independently to the trail or background.
+- Export a full-resolution image or a package of separate background and pose layers.
 - See whether the installed version is current or a new GitHub release exists.
 
-## Shape effects across the trail
+## Shape the trail and background independently
 
-Open the **Effects** timeline beneath the source range and add any combination
-of subject effects. Each effect has its own independent lane and stays clipped
-to the detected person—the background and clean plate remain unchanged.
+The workspace separates effects into two clear scopes:
+
+- **Trail effects** follow the detected subject, sharp poses, photographic
+  stretch, and dense cloned copies. Every lane has its own motion keyframes.
+- **Background effects** process only the clean plate behind the poses. Because
+  the clean plate is a single layer rather than a sequence, these lanes use one
+  constant value instead of pretend timeline keyframes.
+
+The two editors work like an accordion, keeping one expanded at a time so the
+photograph remains the largest part of the workspace. Their stacks are fully
+independent and changing either scope reuses the existing frame and mask cache.
 
 Start with `0 → 100 → 0`, `0 → 100`, or `100 → 0`, then drag the keyframes or
 enter exact position and value percentages. Effect positions use normalized
@@ -95,6 +103,11 @@ motion progress, so the curve survives changes to the in/out range, pose count,
 disabled frames, and overlap order.
 
 - **Opacity** fades copies in and out.
+- **Blend mode** mixes each pose with the composite beneath it. Choose from 27
+  familiar modes including Multiply, Screen, Overlay, Soft Light, Difference,
+  Hue, Color, and Luminosity, then keyframe the strength from Normal to the
+  selected mode. Add Blend Mode repeatedly to build an order-dependent stack;
+  each lane receives the composited result of the lane beneath it.
 - **Saturation** moves between grayscale and the original colour.
 - **Blur** uses a configurable maximum radius in output pixels.
 - **JPEG quality** runs from visibly damaged at 0% to clean at 100%.
@@ -102,13 +115,39 @@ disabled frames, and overlap order.
   and pattern-size controls.
 
 Drag lanes to change processing order, or bypass one temporarily without losing
-its keyframes. Dense clones and photographic stretch inherit the same effects
-between their original source frames.
+its settings. Background opacity fades a processed layer back toward the
+untouched clean plate; background blend modes behave like a duplicate clean
+plate layer blended over its original.
 
-![Chronophoto with independent opacity, blur, and halftone effect lanes](docs/images/chronophoto-effect-timeline.png)
+![Chronophoto with separate trail and background effect editors](docs/images/chronophoto-effect-timeline.png)
 
-*Effect lanes stay aligned with the selected source range while the photograph
-remains the main workspace.*
+*Trail lanes stay aligned with motion progress; background lanes use one exact
+value. The editors collapse independently so the photograph remains the main
+workspace.*
+
+## Export a finished image or editable layers
+
+The default **Export composite** action still writes one full-resolution PNG,
+TIFF, or JPEG. Open **Outputs** when you want reusable parts and select any
+combination of:
+
+- **Finished composite** — the complete Chronophoto image.
+- **Poses · combined transparent PNG** — every masked pose on one alpha layer.
+- **Poses · separate transparent PNGs** — one numbered PNG per masked pose.
+- **Background only** — the processed clean plate without poses.
+
+Single combined-pose and background outputs save directly as PNG files.
+Combinations and separate-pose batches are collected in a safely named
+`-chronophoto-layers` folder, so individual poses never scatter through an
+existing folder or overwrite an earlier package. Transparent pose files retain opacity,
+saturation, blur, JPEG, stippling, dithering, and halftone effects. Blend modes
+remain in the finished composite because a flat transparent PNG has no backdrop
+to blend with.
+
+![Chronophoto output selector with composite, transparent poses, individual poses, and background enabled](docs/images/chronophoto-layer-export.png)
+
+*The simple one-file export remains the default; layer controls stay folded
+away until they are needed.*
 
 ## Real-footage examples
 
@@ -176,12 +215,22 @@ shows exactly which pixels Chronophoto will keep.
 *Zoom is anchored beneath the pointer. Double-click the preview to return to a
 fitted view.*
 
-## Show what you made
+## Get creative. Show what you made.
 
-Created a motion study you like? Share the exported image in Chronophoto's
+Chronophoto does not have to stop at a clean, literal action sequence. Stack
+effects, reverse the overlap, stretch movement, export layers, and combine the
+results into something strange and personal.
+
+![Experimental Chronophoto artwork combining repeated movement, transparency, blur, and halftone texture](docs/images/community-experimental-motion-study.png)
+
+*Push the trail until the source movement becomes a texture, a rhythm, or an
+entirely new composition.*
+
+Made something surprising? Share it in Chronophoto's
 [Show and tell discussions](https://github.com/m-a-x-s-e-e-l-i-g/chronophoto/discussions/categories/show-and-tell).
-Add a few words about the movement, your source footage, or the settings that
-helped you get the result.
+Add a few words about the movement, source footage, effects, or happy accidents
+that helped you reach the result. Your experiment might become someone else's
+starting point.
 
 [Start a Show and tell post](https://github.com/m-a-x-s-e-e-l-i-g/chronophoto/discussions/new?category=show-and-tell)
 or browse the community's creations for inspiration.

@@ -9,13 +9,14 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
+from PIL import Image  # noqa: E402
 from PySide6.QtCore import QMimeData, QPoint, QPointF, QSignalBlocker, Qt, QUrl  # noqa: E402
 from PySide6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QImage, QWheelEvent  # noqa: E402
 from PySide6.QtWidgets import QApplication, QSlider  # noqa: E402
 
 from chronophoto import __version__  # noqa: E402
 from chronophoto.app import application_stylesheet, main  # noqa: E402
-from chronophoto.processing import EffectKeyframe  # noqa: E402
+from chronophoto.processing import BLEND_MODES, EffectKeyframe  # noqa: E402
 from chronophoto.processing.sources import MediaSequence, VideoInfo  # noqa: E402
 from chronophoto.ui.effects import EffectKeyframeGraph  # noqa: E402
 from chronophoto.ui.widgets import (  # noqa: E402
@@ -185,7 +186,7 @@ def test_trail_style_is_disabled_and_smear_defaults_to_none() -> None:
     window.close()
 
 
-def test_effect_timeline_adds_independent_neutral_tracks() -> None:
+def test_trail_effect_timeline_adds_independent_neutral_tracks() -> None:
     _app = QApplication.instance() or QApplication([])
     window = ChronophotoWindow()
 
@@ -193,8 +194,10 @@ def test_effect_timeline_adds_independent_neutral_tracks() -> None:
     assert window.effect_timeline.isHidden()
     window.source = SourceState("video", [])
     window._set_loaded_state(True)
+    assert window.effect_timeline.title_label.text() == "TRAIL EFFECTS"
     for kind in (
         "opacity",
+        "blend_mode",
         "saturation",
         "blur",
         "jpeg_quality",
@@ -207,6 +210,7 @@ def test_effect_timeline_adds_independent_neutral_tracks() -> None:
     tracks = window.effect_timeline.tracks()
     assert [track.kind for track in tracks] == [
         "opacity",
+        "blend_mode",
         "saturation",
         "blur",
         "jpeg_quality",
@@ -214,8 +218,159 @@ def test_effect_timeline_adds_independent_neutral_tracks() -> None:
         "dithering",
         "halftone",
     ]
-    assert [track.value_at(0.5) for track in tracks] == [100, 100, 0, 100, 0, 0, 0]
-    assert window._settings_snapshot().effect_tracks == tracks
+    assert [track.value_at(0.5) for track in tracks] == [100, 100, 100, 0, 100, 0, 0, 0]
+    assert window._settings_snapshot().trail_effect_tracks == tracks
+    window.close()
+
+
+def test_background_effects_use_constant_values_and_a_separate_scope() -> None:
+    _app = QApplication.instance() or QApplication([])
+    window = ChronophotoWindow()
+    panel = window.background_effect_timeline
+
+    assert panel.title_label.text() == "BACKGROUND EFFECTS"
+    assert panel.summary.text() == "NO EFFECTS · CLEAN PLATE"
+    assert not panel.is_expanded
+    lane = panel.add_effect("blur")
+
+    assert panel.is_expanded
+    assert not window.trail_effect_timeline.is_expanded
+    assert lane.graph.isHidden()
+    assert lane.preset.isHidden()
+    assert lane.position_spin.isHidden()
+    assert lane.value_spin.isVisibleTo(lane)
+    lane.value_spin.setValue(64)
+    lane._constant_value_committed()
+
+    track = lane.track
+    assert [point.value for point in track.keyframes] == [64, 64]
+    assert window._settings_snapshot().background_effect_tracks == (track,)
+    window.close()
+
+
+def test_background_effects_offer_the_same_effect_types_as_trail_effects() -> None:
+    _app = QApplication.instance() or QApplication([])
+    window = ChronophotoWindow()
+    with QSignalBlocker(window.background_effect_timeline):
+        for kind in (
+            "opacity",
+            "blend_mode",
+            "saturation",
+            "blur",
+            "jpeg_quality",
+            "stippling",
+            "dithering",
+            "halftone",
+        ):
+            window.background_effect_timeline.add_effect(kind)
+
+    assert [track.kind for track in window.background_effect_timeline.tracks()] == [
+        "opacity",
+        "blend_mode",
+        "saturation",
+        "blur",
+        "jpeg_quality",
+        "stippling",
+        "dithering",
+        "halftone",
+    ]
+    window.close()
+
+
+def test_export_outputs_allow_any_layer_combination() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = ChronophotoWindow()
+    path = Path("clip.mp4")
+    window.source = SourceState("video", [path], VideoInfo(path, 3.0, 640, 480, 30.0, 90))
+    window._set_loaded_state(True)
+
+    assert window._export_selections() == ("composite",)
+    assert window.export_button.text() == "Export composite"
+    window.export_options_button.click()
+    assert not window.export_options_panel.isHidden()
+
+    window.export_checks["combined_poses"].setChecked(True)
+    window.export_checks["individual_poses"].setChecked(True)
+    window.export_checks["background"].setChecked(True)
+    assert window._export_selections() == (
+        "composite",
+        "combined_poses",
+        "individual_poses",
+        "background",
+    )
+    assert window.export_options_button.text() == "OUTPUTS · 4 SELECTED ▾"
+    assert window.export_button.text() == "Export 4 outputs"
+    window.resize(960, 680)
+    window.show()
+    app.processEvents()
+    window._update_compact_workspace()
+    app.processEvents()
+    assert window.preview_canvas.height() >= 180
+    assert window.export_button.isVisible()
+    assert all(checkbox.isVisible() for checkbox in window.export_checks.values())
+
+    for checkbox in window.export_checks.values():
+        checkbox.setChecked(False)
+    assert window._export_selections() == ()
+    assert not window.export_button.isEnabled()
+    assert window.export_options_button.text() == "OUTPUTS · NONE ▾"
+    window.close()
+
+
+def test_layer_package_export_runs_once_and_writes_selected_outputs(monkeypatch, tmp_path) -> None:
+    _app = QApplication.instance() or QApplication([])
+    window = ChronophotoWindow()
+    path = Path("clip.mp4")
+    window.source = SourceState("video", [path], VideoInfo(path, 2.0, 48, 32, 2.0, 4))
+    window._set_loaded_state(True)
+    window.export_checks["composite"].setChecked(False)
+    window.export_checks["combined_poses"].setChecked(True)
+    window.export_checks["individual_poses"].setChecked(True)
+    window.export_checks["background"].setChecked(True)
+
+    frames: list[np.ndarray] = []
+    for index in range(4):
+        frame = np.full((32, 48, 3), (20, 40, 80), dtype=np.uint8)
+        frame[10:24, 4 + index * 9 : 12 + index * 9] = (220, 60, 30)
+        frames.append(frame)
+    sequence = MediaSequence(
+        frames,
+        [f"00:0{index}.00" for index in range(4)],
+        (48, 32),
+        [index / 2 for index in range(4)],
+    )
+    monkeypatch.setattr("chronophoto.ui.window.load_video_sequence", lambda *a, **k: sequence)
+    monkeypatch.setattr(
+        "chronophoto.ui.window.QFileDialog.getExistingDirectory",
+        lambda *a, **k: str(tmp_path),
+    )
+
+    def run_now(task, on_finished, detail):  # type: ignore[no-untyped-def]
+        del detail
+        on_finished(task(lambda value, message: None))
+
+    monkeypatch.setattr(window, "_start_task", run_now)
+    window.export_composite()
+
+    package = tmp_path / "clip-chronophoto-layers"
+    assert (package / "poses.png").is_file()
+    assert (package / "background.png").is_file()
+    assert len(list((package / "poses").glob("pose-*.png"))) == 4
+    assert not (package / "composite.png").exists()
+    assert window._last_export_path == package
+    assert window.status_text.text() == "EXPORT COMPLETE"
+
+    window.export_checks["individual_poses"].setChecked(False)
+    window.export_checks["background"].setChecked(False)
+    single_pose_path = tmp_path / "only-poses.png"
+    monkeypatch.setattr(
+        "chronophoto.ui.window.QFileDialog.getSaveFileName",
+        lambda *a, **k: (str(single_pose_path), "PNG image (*.png)"),
+    )
+    window.export_composite()
+    assert single_pose_path.is_file()
+    assert Image.open(single_pose_path).mode == "RGBA"
+    assert window._last_export_path == single_pose_path
     window.close()
 
 
@@ -232,6 +387,75 @@ def test_effect_lane_presets_and_bypass_preserve_keyframes() -> None:
     assert window.effect_timeline.summary.text().startswith("0 ACTIVE / 1 TRACKS")
     lane.enabled_box.setChecked(True)
     assert lane.track.enabled
+    window.close()
+
+
+def test_blend_mode_lane_exposes_all_modes_and_commits_selection() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = ChronophotoWindow()
+    lane = window.effect_timeline.add_effect("blend_mode")
+    assert lane.mode_combo is not None
+    available = tuple(
+        lane.mode_combo.itemData(index)
+        for index in range(lane.mode_combo.count())
+        if lane.mode_combo.itemData(index) is not None
+    )
+
+    assert available == BLEND_MODES
+    assert lane.track.option == "multiply"
+    assert lane.track.value_at(0.5) == 100.0
+    lane.mode_combo.setCurrentIndex(lane.mode_combo.findData("soft_light"))
+    assert lane.track.option == "soft_light"
+
+    initial_index = lane.mode_combo.currentIndex()
+    event = QWheelEvent(
+        QPointF(10, 10),
+        QPointF(10, 10),
+        QPoint(),
+        QPoint(0, -120),
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+        Qt.ScrollPhase.ScrollUpdate,
+        False,
+    )
+    app.sendEvent(lane.mode_combo, event)
+    assert lane.mode_combo.currentIndex() == initial_index
+    assert not event.isAccepted()
+    window.close()
+
+
+def test_blend_mode_lanes_can_be_stacked_in_both_effect_scopes() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = ChronophotoWindow()
+    window.resize(1500, 900)
+    window.show()
+    app.processEvents()
+
+    with QSignalBlocker(window.trail_effect_timeline):
+        multiply = window.trail_effect_timeline.add_effect("blend_mode")
+        screen = window.trail_effect_timeline.add_effect("blend_mode")
+        first_blur = window.trail_effect_timeline.add_effect("blur")
+        repeated_blur = window.trail_effect_timeline.add_effect("blur")
+        assert screen.mode_combo is not None
+        screen.mode_combo.setCurrentIndex(screen.mode_combo.findData("screen"))
+    assert multiply is not screen
+    assert first_blur is repeated_blur
+    assert multiply.mode_combo is not None
+    assert [track.option for track in window.trail_effect_timeline.tracks()[:2]] == [
+        "multiply",
+        "screen",
+    ]
+    assert multiply.name_label.text().startswith("BLEND")
+    assert screen.name_label.text().startswith("BLEND")
+
+    with QSignalBlocker(window.background_effect_timeline):
+        background_multiply = window.background_effect_timeline.add_effect("blend_mode")
+        background_overlay = window.background_effect_timeline.add_effect("blend_mode")
+    assert background_multiply is not background_overlay
+    assert [track.kind for track in window.background_effect_timeline.tracks()] == [
+        "blend_mode",
+        "blend_mode",
+    ]
     window.close()
 
 
@@ -320,7 +544,7 @@ def test_effect_editor_has_a_usable_compact_window_state() -> None:
     window.source = SourceState("video", [path], VideoInfo(path, 10.0, 1920, 1080, 30.0, 300))
     window._set_loaded_state(True)
     with QSignalBlocker(window.effect_timeline):
-        lane = window.effect_timeline.add_effect("opacity")
+        lane = window.effect_timeline.add_effect("blend_mode")
     window.resize(960, 680)
     window.show()
     app.processEvents()
@@ -332,6 +556,10 @@ def test_effect_editor_has_a_usable_compact_window_state() -> None:
     assert window.preview_mode_buttons["composite"].isVisible()
     assert window.preview_canvas.height() >= 180
     assert lane.graph.height() >= 50
+    assert lane.more_button.isVisible()
+    assert lane.reset_button.isHidden()
+    assert lane.mode_combo is not None and lane.mode_combo.isVisible()
+    assert lane.width() <= window.effect_timeline.scroll.viewport().width()
     assert window.export_button.isVisible()
 
     window.resize(1380, 880)
@@ -550,6 +778,21 @@ def test_range_render_reuses_the_file_level_video_cache(monkeypatch) -> None:
     with QSignalBlocker(window.effect_timeline):
         lane = window.effect_timeline.add_effect("opacity")
         lane.preset.setCurrentIndex(lane.preset.findData("rise_fall"))
+    window.render_preview()
+    deadline = monotonic() + 5
+    while window._thread is not None and monotonic() < deadline:
+        app.processEvents()
+        sleep(0.01)
+
+    assert window._thread is None
+    assert decoder_calls == []
+    assert analysis_builds == []
+    assert "cached frames and masks" in window.status_detail.text()
+
+    with QSignalBlocker(window.background_effect_timeline):
+        background_lane = window.background_effect_timeline.add_effect("saturation")
+        background_lane.value_spin.setValue(0)
+        background_lane._constant_value_committed()
     window.render_preview()
     deadline = monotonic() + 5
     while window._thread is not None and monotonic() < deadline:

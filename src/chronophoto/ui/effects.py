@@ -4,6 +4,7 @@ from PySide6.QtCore import QPoint, QPointF, QRectF, QSignalBlocker, Qt, Signal
 from PySide6.QtGui import QColor, QKeyEvent, QMouseEvent, QPainter, QPen, QWheelEvent
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -17,6 +18,8 @@ from PySide6.QtWidgets import (
 )
 
 from chronophoto.processing import (
+    BLEND_MODE_LABELS,
+    BLEND_MODES,
     EFFECT_KINDS,
     EFFECT_LABELS,
     EffectKeyframe,
@@ -305,10 +308,18 @@ class EffectLane(QFrame):
     drag_moved = Signal(object, QPoint)
     drag_finished = Signal(object)
 
-    def __init__(self, track: EffectTrack, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        track: EffectTrack,
+        *,
+        keyframed: bool = True,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setObjectName("effectLane")
         self._track = track
+        self._keyframed = keyframed
+        self._narrow = False
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 6, 8, 8)
         layout.setSpacing(5)
@@ -324,18 +335,20 @@ class EffectLane(QFrame):
         self.collapse_button.setArrowType(Qt.ArrowType.DownArrow)
         self.collapse_button.setToolTip("Collapse effect lane")
         self.collapse_button.clicked.connect(self._toggle_collapsed)
-        label = QLabel(EFFECT_LABELS[track.kind].upper())
-        label.setObjectName("effectName")
+        self.name_label = QLabel(EFFECT_LABELS[track.kind].upper())
+        self.name_label.setObjectName("effectName")
         self.enabled_box = QCheckBox("ON")
         self.enabled_box.setChecked(track.enabled)
-        self.enabled_box.setToolTip("Bypass this effect without losing its keyframes")
+        self.enabled_box.setToolTip("Bypass this effect without losing its settings")
         self.enabled_box.toggled.connect(self._enabled_changed)
         self.preset = ScrollSafeComboBox()
         self.preset.setObjectName("effectPreset")
         self.preset.addItem("CUSTOM", "custom")
+        self.preset.addItem("100 CONSTANT", "full")
         self.preset.addItem("0 → 100 → 0", "rise_fall")
         self.preset.addItem("0 → 100", "rise")
         self.preset.addItem("100 → 0", "fall")
+        self.preset.setFixedWidth(126)
         self.preset.currentIndexChanged.connect(self._preset_changed)
         self.reset_button = QPushButton("RESET")
         self.reset_button.setObjectName("effectTextButton")
@@ -346,12 +359,13 @@ class EffectLane(QFrame):
         self.more_button = QToolButton()
         self.more_button.setObjectName("effectMoreButton")
         self.more_button.setText("···")
+        self.more_button.setFixedWidth(29)
         self.more_button.setToolTip("More effect actions")
         self.more_button.clicked.connect(self._show_more_menu)
         self.more_button.hide()
         header.addWidget(self.drag_handle)
         header.addWidget(self.collapse_button)
-        header.addWidget(label)
+        header.addWidget(self.name_label)
         header.addWidget(self.enabled_box)
         header.addStretch()
         header.addWidget(self.preset)
@@ -366,24 +380,48 @@ class EffectLane(QFrame):
         details_layout.setSpacing(4)
         value_row = QHBoxLayout()
         value_row.setSpacing(7)
-        position_label = QLabel("POSITION")
-        position_label.setObjectName("effectMeta")
+        self.position_label = QLabel("POSITION")
+        self.position_label.setObjectName("effectMeta")
         self.position_spin = ScrollSafeSpinBox()
         self.position_spin.setObjectName("effectKeyframeSpin")
+        self.position_spin.setAccessibleName("Keyframe position")
         self.position_spin.setRange(0, 100)
         self.position_spin.setSuffix("%")
         self.position_spin.valueChanged.connect(self._numeric_keyframe_changing)
-        value_label = QLabel("VALUE")
-        value_label.setObjectName("effectMeta")
+        self.value_label = QLabel("VALUE")
+        self.value_label.setObjectName("effectMeta")
         self.value_spin = ScrollSafeSpinBox()
         self.value_spin.setObjectName("effectKeyframeSpin")
+        self.value_spin.setAccessibleName("Keyframe value")
         self.value_spin.setRange(0, 100)
         self.value_spin.setSuffix("%")
         self.value_spin.valueChanged.connect(self._numeric_keyframe_changing)
-        value_row.addWidget(position_label)
+        value_row.addWidget(self.position_label)
         value_row.addWidget(self.position_spin)
-        value_row.addWidget(value_label)
+        value_row.addWidget(self.value_label)
         value_row.addWidget(self.value_spin)
+        self.mode_combo: ScrollSafeComboBox | None = None
+        self.mode_label: QLabel | None = None
+        if track.kind == "blend_mode":
+            self.mode_label = QLabel("MODE")
+            self.mode_label.setObjectName("effectMeta")
+            self.mode_combo = ScrollSafeComboBox()
+            self.mode_combo.setObjectName("effectMode")
+            self.mode_combo.setAccessibleName("Blend mode")
+            self.mode_combo.setFixedWidth(184)
+            self.mode_combo.setMinimumContentsLength(16)
+            self.mode_combo.setSizeAdjustPolicy(
+                QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+            )
+            self.mode_combo.setToolTip("Blend each masked pose with the composite underneath it")
+            for index, mode in enumerate(BLEND_MODES):
+                self.mode_combo.addItem(BLEND_MODE_LABELS[mode].upper(), mode)
+                if index in {1, 6, 11, 18, 22}:
+                    self.mode_combo.insertSeparator(self.mode_combo.count())
+            self.mode_combo.setCurrentIndex(self.mode_combo.findData(track.option))
+            self.mode_combo.currentIndexChanged.connect(self._mode_changed)
+            value_row.addWidget(self.mode_label)
+            value_row.addWidget(self.mode_combo)
         value_row.addStretch()
         self.amount_spin: ScrollSafeSpinBox | None = None
         if track.kind in {"blur", "stippling", "dithering", "halftone"}:
@@ -408,11 +446,22 @@ class EffectLane(QFrame):
         self.graph.keyframes_changing.connect(self._keyframes_changing)
         self.graph.keyframes_committed.connect(self._keyframes_committed)
         self.graph.selection_changed.connect(self._selection_changed)
-        self.position_spin.editingFinished.connect(self.graph.commit_selected)
-        self.value_spin.editingFinished.connect(self.graph.commit_selected)
+        if keyframed:
+            self.position_spin.editingFinished.connect(self.graph.commit_selected)
+            self.value_spin.editingFinished.connect(self.graph.commit_selected)
+        else:
+            self.value_spin.editingFinished.connect(self._constant_value_committed)
         details_layout.addWidget(self.graph)
         layout.addWidget(self.details)
         self.graph._emit_selection()
+        if all(point.value == 100.0 for point in track.keyframes):
+            with QSignalBlocker(self.preset):
+                self.preset.setCurrentIndex(self.preset.findData("full"))
+        self.preset.setVisible(keyframed)
+        self.position_label.setVisible(keyframed)
+        self.position_spin.setVisible(keyframed)
+        self.graph.setVisible(keyframed)
+        self._sync_name_label()
         self._sync_enabled_style()
 
     @property
@@ -425,12 +474,14 @@ class EffectLane(QFrame):
         keyframes: tuple[EffectKeyframe, ...] | None = None,
         enabled: bool | None = None,
         amount: float | None = None,
+        option: str | None = None,
     ) -> EffectTrack:
         self._track = EffectTrack(
             self._track.kind,
             self._track.keyframes if keyframes is None else keyframes,
             self._track.enabled if enabled is None else enabled,
             self._track.amount if amount is None else amount,
+            self._track.option if option is None else option,
         )
         return self._track
 
@@ -477,15 +528,35 @@ class EffectLane(QFrame):
         if self.amount_spin is not None:
             with QSignalBlocker(self.amount_spin):
                 self.amount_spin.setValue(round(self._track.amount))
+        if self.mode_combo is not None:
+            with QSignalBlocker(self.mode_combo):
+                self.mode_combo.setCurrentIndex(self.mode_combo.findData(self._track.option))
         with QSignalBlocker(self.preset):
             self.preset.setCurrentIndex(0)
         self.graph.set_keyframes(self._track.keyframes)
+        self._sync_name_label()
         self._sync_enabled_style()
         self.track_committed.emit(self._track)
 
     def _amount_changed(self, value: int) -> None:
         self._replace_track(amount=float(value))
         self.track_committed.emit(self._track)
+
+    def _mode_changed(self) -> None:
+        if self.mode_combo is None or self.mode_combo.currentData() is None:
+            return
+        self._replace_track(option=str(self.mode_combo.currentData()))
+        self._sync_name_label()
+        self.track_committed.emit(self._track)
+
+    def _sync_name_label(self) -> None:
+        if self._track.kind == "blend_mode":
+            separator = "/" if self._narrow else " · "
+            self.name_label.setText(
+                f"BLEND{separator}{BLEND_MODE_LABELS[self._track.option].upper()}"
+            )
+            return
+        self.name_label.setText(EFFECT_LABELS[self._track.kind].upper())
 
     def _keyframes_changing(self, keyframes: object) -> None:
         with QSignalBlocker(self.preset):
@@ -507,18 +578,48 @@ class EffectLane(QFrame):
         self.position_spin.setEnabled(0 < self.graph.selected_index < len(self.graph.keyframes) - 1)
 
     def _numeric_keyframe_changing(self) -> None:
+        if not self._keyframed:
+            value = float(self.value_spin.value())
+            self._replace_track(keyframes=(EffectKeyframe(0.0, value), EffectKeyframe(1.0, value)))
+            self.track_changing.emit(self._track)
+            return
         self.graph.set_selected_values(
             self.position_spin.value() / 100.0,
             float(self.value_spin.value()),
             live=True,
         )
 
+    def _constant_value_committed(self) -> None:
+        if not self._keyframed:
+            self.track_committed.emit(self._track)
+
     def set_compact(self, compact: bool) -> None:
         self.graph.setMinimumHeight(50 if compact else 60)
-        narrow = self.width() < 650
+        narrow = compact or self.window().width() < 1100 or self.width() < 650
+        self._narrow = narrow
+        self._sync_name_label()
         self.reset_button.setVisible(not narrow)
         self.remove_button.setVisible(not narrow)
         self.more_button.setVisible(narrow)
+        self.preset.setVisible(self._keyframed)
+        self.preset.setFixedWidth(112 if narrow else 126)
+        self.position_label.setVisible(self._keyframed and not narrow)
+        self.position_spin.setVisible(self._keyframed)
+        self.value_label.setVisible(not narrow)
+        self.position_spin.setPrefix("P " if narrow and self._keyframed else "")
+        self.value_spin.setPrefix("V " if narrow else "")
+        self.position_spin.setFixedWidth(74 if narrow else 58)
+        self.value_spin.setFixedWidth(74 if narrow else 58)
+        if self.mode_label is not None:
+            self.mode_label.setVisible(not narrow)
+        if self.mode_combo is not None:
+            self.mode_combo.setMinimumContentsLength(10 if narrow else 16)
+            self.mode_combo.setFixedWidth(126 if narrow else 184)
+        self.graph.setVisible(self._keyframed)
+        self.layout().invalidate()
+        self.updateGeometry()
+        if self.parentWidget() is not None:
+            self.parentWidget().updateGeometry()
 
     def resizeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         self.set_compact(self.window().height() < 760)
@@ -528,10 +629,23 @@ class EffectLane(QFrame):
 class EffectTimelinePanel(QFrame):
     tracks_changing = Signal()
     tracks_committed = Signal()
+    expanded_changed = Signal(bool)
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        title: str = "TRAIL EFFECTS",
+        scope: str = "MASKED POSES",
+        *,
+        keyframed: bool = True,
+        empty_text: str | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setObjectName("effectsPanel")
+        self._title = title
+        self._scope = scope
+        self._keyframed = keyframed
+        self._expanded = True
         self._lanes: list[EffectLane] = []
         self._drag_lane: EffectLane | None = None
         layout = QVBoxLayout(self)
@@ -543,21 +657,27 @@ class EffectTimelinePanel(QFrame):
         self.toggle_button.setObjectName("effectIconButton")
         self.toggle_button.setArrowType(Qt.ArrowType.DownArrow)
         self.toggle_button.clicked.connect(self._toggle_tracks)
-        label = QLabel("EFFECTS")
-        label.setObjectName("controlLabel")
-        self.summary = QLabel("NO EFFECTS · SUBJECT ONLY")
+        self.title_label = QLabel(title)
+        self.title_label.setObjectName("controlLabel")
+        self.summary = QLabel(f"NO EFFECTS · {scope}")
         self.summary.setObjectName("effectMeta")
         self.add_button = QPushButton("+ ADD EFFECT")
         self.add_button.setObjectName("effectAddButton")
         self.add_button.clicked.connect(self._show_add_menu)
         header.addWidget(self.toggle_button)
-        header.addWidget(label)
+        header.addWidget(self.title_label)
         header.addWidget(self.summary)
         header.addStretch()
         header.addWidget(self.add_button)
         layout.addLayout(header)
 
-        self.empty_label = QLabel("Add a keyframed effect to shape the subject across motion.")
+        if empty_text is None:
+            empty_text = (
+                "Add a keyframed effect to shape the masked poses across motion."
+                if keyframed
+                else "Add a constant effect to process only the clean plate."
+            )
+        self.empty_label = QLabel(empty_text)
         self.empty_label.setObjectName("effectEmpty")
         self.empty_label.setWordWrap(True)
         layout.addWidget(self.empty_label)
@@ -565,7 +685,7 @@ class EffectTimelinePanel(QFrame):
         self.scroll.setObjectName("effectsScroll")
         self.scroll.setWidgetResizable(True)
         self.scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.scroll.setMaximumHeight(222)
+        self.scroll.setMaximumHeight(222 if keyframed else 128)
         self.scroll.setMinimumHeight(0)
         self.lane_container = QWidget()
         self.lane_container.setObjectName("effectsContainer")
@@ -581,6 +701,10 @@ class EffectTimelinePanel(QFrame):
     def tracks(self) -> tuple[EffectTrack, ...]:
         return tuple(lane.track for lane in self._lanes)
 
+    @property
+    def is_expanded(self) -> bool:
+        return self._expanded
+
     def clear(self) -> None:
         for lane in self._lanes:
             lane.deleteLater()
@@ -589,19 +713,29 @@ class EffectTimelinePanel(QFrame):
 
     def set_compact(self, compact: bool) -> None:
         self._compact = compact
-        self.scroll.setMaximumHeight(148 if compact else 222)
+        self.scroll.setMaximumHeight(
+            148 if compact and self._keyframed else 222 if self._keyframed else 96
+        )
         for lane in self._lanes:
             lane.set_compact(compact)
-        self.setMinimumHeight(132 if self._lanes else 0)
+        self.lane_layout.invalidate()
+        self.lane_container.updateGeometry()
+        self.setMinimumHeight(self._expanded_minimum_height())
 
     def add_effect(self, kind: str) -> EffectLane:
         if kind not in EFFECT_KINDS:
             raise ValueError(f"unsupported effect: {kind}")
-        existing = next((lane for lane in self._lanes if lane.track.kind == kind), None)
+        existing = next(
+            (lane for lane in self._lanes if lane.track.kind == kind and kind != "blend_mode"),
+            None,
+        )
         if existing is not None:
             existing.show()
             return existing
-        lane = EffectLane(neutral_effect_track(kind))
+        track = neutral_effect_track(kind)
+        if kind == "blend_mode":
+            track = effect_preset(track, "full")
+        lane = EffectLane(track, keyframed=self._keyframed)
         lane.track_changing.connect(lambda _track: self.tracks_changing.emit())
         lane.track_committed.connect(self._lane_committed)
         lane.remove_requested.connect(self._remove_lane)
@@ -612,6 +746,7 @@ class EffectTimelinePanel(QFrame):
         self.lane_layout.insertWidget(len(self._lanes) - 1, lane)
         self._sync_state()
         lane.set_compact(self._compact)
+        self.set_expanded(True)
         self.tracks_committed.emit()
         return lane
 
@@ -624,8 +759,11 @@ class EffectTimelinePanel(QFrame):
         menu = QMenu(self)
         active = {lane.track.kind for lane in self._lanes}
         for kind in EFFECT_KINDS:
-            action = menu.addAction(EFFECT_LABELS[kind])
-            action.setEnabled(kind not in active)
+            label = EFFECT_LABELS[kind]
+            if kind == "blend_mode" and kind in active:
+                label = "Blend mode · add another"
+            action = menu.addAction(label)
+            action.setEnabled(kind == "blend_mode" or kind not in active)
             action.triggered.connect(lambda checked=False, selected=kind: self.add_effect(selected))
         menu.exec(self.add_button.mapToGlobal(self.add_button.rect().bottomLeft()))
 
@@ -638,28 +776,41 @@ class EffectTimelinePanel(QFrame):
         self.tracks_committed.emit()
 
     def _toggle_tracks(self) -> None:
-        visible = not self.scroll.isVisible() and bool(self._lanes)
-        self.scroll.setVisible(visible)
-        self.empty_label.setVisible(not self._lanes and visible)
-        self.toggle_button.setArrowType(
-            Qt.ArrowType.DownArrow if visible else Qt.ArrowType.RightArrow
-        )
+        self.set_expanded(not self._expanded)
+
+    def set_expanded(self, expanded: bool) -> None:
+        expanded = bool(expanded)
+        if expanded == self._expanded:
+            self._sync_state()
+            return
+        self._expanded = expanded
+        self._sync_state()
+        self.expanded_changed.emit(expanded)
 
     def _sync_state(self) -> None:
         has_lanes = bool(self._lanes)
-        self.empty_label.setVisible(not has_lanes)
-        self.scroll.setVisible(has_lanes)
-        self.toggle_button.setEnabled(has_lanes)
+        self.empty_label.setVisible(not has_lanes and self._expanded)
+        self.scroll.setVisible(has_lanes and self._expanded)
+        self.toggle_button.setEnabled(True)
         self.toggle_button.setArrowType(
-            Qt.ArrowType.DownArrow if has_lanes else Qt.ArrowType.RightArrow
+            Qt.ArrowType.DownArrow if self._expanded else Qt.ArrowType.RightArrow
         )
         active = sum(lane.track.enabled for lane in self._lanes)
         self.summary.setText(
-            f"{active} ACTIVE / {len(self._lanes)} TRACKS · SUBJECT ONLY"
+            f"{active} ACTIVE / {len(self._lanes)} TRACKS · {self._scope}"
             if has_lanes
-            else "NO EFFECTS · SUBJECT ONLY"
+            else f"NO EFFECTS · {self._scope}"
         )
-        self.setMinimumHeight(132 if has_lanes else 0)
+        self.setMinimumHeight(self._expanded_minimum_height())
+
+    def _expanded_minimum_height(self) -> int:
+        if not self._lanes or not self._expanded:
+            return 0
+        if self._keyframed:
+            return 132
+        if self._compact:
+            return 82
+        return min(128, 82 + max(0, len(self._lanes) - 1) * 38)
 
     def _drag_started(self, lane: object) -> None:
         self._drag_lane = lane if isinstance(lane, EffectLane) else None

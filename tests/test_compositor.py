@@ -15,7 +15,12 @@ from chronophoto.processing.compositor import (
     build_compose_cache,
     compose_sequence,
 )
-from chronophoto.processing.effects import EffectKeyframe, EffectTrack, neutral_effect_track
+from chronophoto.processing.effects import (
+    EffectKeyframe,
+    EffectTrack,
+    blend_mode_rgb,
+    neutral_effect_track,
+)
 
 
 def moving_subject_frames(count: int = 7) -> list[np.ndarray]:
@@ -262,6 +267,106 @@ def test_opacity_effect_uses_explicit_normalized_frame_progress() -> None:
     assert returned_masks[0][90, 36] == 1.0
 
 
+def test_blend_mode_uses_the_existing_composite_as_its_backdrop() -> None:
+    background = np.full((48, 80, 3), (80, 120, 160), dtype=np.uint8)
+    frames = [background.copy(), background.copy()]
+    frames[0][12:32, 10:26] = (210, 70, 40)
+    frames[1][12:32, 48:64] = (40, 200, 100)
+    masks = [np.zeros((48, 80), dtype=np.uint8) for _ in frames]
+    masks[0][12:32, 10:26] = 255
+    masks[1][12:32, 48:64] = 255
+    full = (EffectKeyframe(0.0, 100.0), EffectKeyframe(1.0, 100.0))
+    track = EffectTrack("blend_mode", full, option="multiply")
+
+    result, _ = compose_sequence(
+        frames,
+        ComposeSettings(effect_tracks=(track,)),
+        cache=ComposeCache(background, masks),
+    )
+
+    expected_first = np.array((80, 120, 160)) * np.array((210, 70, 40)) / 255.0
+    expected_second = np.array((80, 120, 160)) * np.array((40, 200, 100)) / 255.0
+    assert result[20, 18] == pytest.approx(expected_first, abs=1.0)
+    assert result[20, 56] == pytest.approx(expected_second, abs=1.0)
+    assert np.array_equal(result[2, 2], background[2, 2])
+
+
+def test_blend_mode_tracks_stack_against_the_previous_lane_result() -> None:
+    background = np.full((4, 4, 3), (80, 120, 160), dtype=np.uint8)
+    source = np.full_like(background, (210, 70, 40))
+    frames = [source, background.copy()]
+    masks = [np.full((4, 4), 255, dtype=np.uint8), np.zeros((4, 4), dtype=np.uint8)]
+    full = (EffectKeyframe(0.0, 100.0), EffectKeyframe(1.0, 100.0))
+    multiply = EffectTrack("blend_mode", full, option="multiply")
+    screen = EffectTrack("blend_mode", full, option="screen")
+
+    stacked, _ = compose_sequence(
+        frames,
+        ComposeSettings(trail_effect_tracks=(multiply, screen)),
+        cache=ComposeCache(background, masks),
+    )
+    reversed_stack, _ = compose_sequence(
+        frames,
+        ComposeSettings(trail_effect_tracks=(screen, multiply)),
+        cache=ComposeCache(background, masks),
+    )
+
+    first_lane = blend_mode_rgb(
+        background.astype(np.float32), source.astype(np.float32), "multiply"
+    )
+    expected = blend_mode_rgb(first_lane, source.astype(np.float32), "screen")
+    assert stacked[0, 0] == pytest.approx(expected[0, 0], abs=1.0)
+    assert not np.array_equal(stacked, reversed_stack)
+
+
+def test_zero_blend_strength_is_identical_to_normal_compositing() -> None:
+    frames = moving_subject_frames(3)
+    cache = build_compose_cache(frames, ComposeSettings())
+    zero = (EffectKeyframe(0.0, 0.0), EffectKeyframe(1.0, 0.0))
+
+    normal, _ = compose_sequence(frames, ComposeSettings(), cache=cache)
+    blended, _ = compose_sequence(
+        frames,
+        ComposeSettings(effect_tracks=(EffectTrack("blend_mode", zero, option="screen"),)),
+        cache=cache,
+    )
+
+    assert np.array_equal(blended, normal)
+
+
+def test_background_effects_leave_masked_poses_unfiltered() -> None:
+    background = np.full((48, 80, 3), (40, 120, 210), dtype=np.uint8)
+    frames = [background.copy(), background.copy()]
+    frames[0][12:32, 10:26] = (220, 60, 30)
+    frames[1][12:32, 48:64] = (30, 210, 70)
+    masks = [np.zeros((48, 80), dtype=np.uint8) for _ in frames]
+    masks[0][12:32, 10:26] = 255
+    masks[1][12:32, 48:64] = 255
+    zero = (EffectKeyframe(0.0, 0.0), EffectKeyframe(1.0, 0.0))
+
+    result, returned_masks = compose_sequence(
+        frames,
+        ComposeSettings(
+            background_effect_tracks=(EffectTrack("saturation", zero),),
+        ),
+        cache=ComposeCache(background, masks),
+    )
+
+    assert result[2, 2, 0] == result[2, 2, 1] == result[2, 2, 2]
+    assert np.array_equal(result[20, 18], (220, 60, 30))
+    assert np.array_equal(result[20, 56], (30, 210, 70))
+    assert returned_masks[0][20, 18] == 1.0
+
+
+def test_legacy_effect_tracks_remain_a_trail_effect_alias() -> None:
+    track = neutral_effect_track("opacity")
+    settings = ComposeSettings(effect_tracks=(track,))
+
+    assert settings.trail_effect_tracks == (track,)
+    with pytest.raises(ValueError, match="not both"):
+        ComposeSettings(effect_tracks=(track,), trail_effect_tracks=(track,))
+
+
 @pytest.mark.parametrize("smear_style", ["photographic", "dense_clones"])
 def test_effects_apply_to_generated_smear_pixels(smear_style: str) -> None:
     frames = moving_subject_frames(4)
@@ -282,6 +387,34 @@ def test_effects_apply_to_generated_smear_pixels(smear_style: str) -> None:
     background = build_background(frames, "median")
 
     assert np.array_equal(result, background)
+
+
+@pytest.mark.parametrize("smear_style", ["photographic", "dense_clones"])
+def test_blend_modes_apply_to_generated_smear_layers(smear_style: str) -> None:
+    frames = moving_subject_frames(4)
+    base_settings = ComposeSettings(
+        threshold=18,
+        feather=0,
+        background="median",
+        smear_style=smear_style,
+    )
+    cache = build_compose_cache(frames, base_settings)
+    full = (EffectKeyframe(0.0, 100.0), EffectKeyframe(1.0, 100.0))
+
+    normal, _ = compose_sequence(frames, base_settings, cache=cache)
+    difference, _ = compose_sequence(
+        frames,
+        ComposeSettings(
+            threshold=18,
+            feather=0,
+            background="median",
+            smear_style=smear_style,
+            effect_tracks=(EffectTrack("blend_mode", full, option="difference"),),
+        ),
+        cache=cache,
+    )
+
+    assert not np.array_equal(difference, normal)
 
 
 def test_effect_progress_requires_one_chronological_value_per_frame() -> None:

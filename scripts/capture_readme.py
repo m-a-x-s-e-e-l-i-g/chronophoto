@@ -9,7 +9,7 @@ from time import monotonic, sleep
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PIL import Image
-from PySide6.QtCore import QPointF
+from PySide6.QtCore import QPointF, QSignalBlocker
 from PySide6.QtGui import QFont, QIcon
 from PySide6.QtWidgets import QApplication
 from render_smoke_fixture import build_frames
@@ -87,6 +87,38 @@ def main() -> int:
     window.preview_canvas.zoom_by(1.45, QPointF(window.preview_canvas.rect().center()))
     app.processEvents()
     window.grab().save(str(OUTPUT_DIR / "chronophoto-mask-inspection.png"), "PNG")
+
+    window.preview_canvas.reset_view()
+    window._set_preview_mode("composite")
+    with QSignalBlocker(window.trail_effect_timeline):
+        opacity = window.trail_effect_timeline.add_effect("opacity")
+        opacity.preset.setCurrentIndex(opacity.preset.findData("rise_fall"))
+        blur = window.trail_effect_timeline.add_effect("blur")
+        blur.preset.setCurrentIndex(blur.preset.findData("rise"))
+        blur.amount_spin.setValue(24)
+        halftone = window.trail_effect_timeline.add_effect("halftone")
+        halftone.preset.setCurrentIndex(halftone.preset.findData("fall"))
+        halftone.amount_spin.setValue(8)
+    with QSignalBlocker(window.background_effect_timeline):
+        multiply = window.background_effect_timeline.add_effect("blend_mode")
+        screen = window.background_effect_timeline.add_effect("blend_mode")
+        assert screen.mode_combo is not None
+        screen.mode_combo.setCurrentIndex(screen.mode_combo.findData("screen"))
+        multiply._toggle_collapsed()
+        screen._toggle_collapsed()
+    window.trail_effect_timeline.set_expanded(False)
+    window.background_effect_timeline.set_expanded(True)
+    window.render_preview()
+    _wait_for_preview(app, window)
+    app.processEvents()
+    window.grab().save(str(OUTPUT_DIR / "chronophoto-effect-timeline.png"), "PNG")
+
+    window.background_effect_timeline.set_expanded(False)
+    window.export_options_button.click()
+    for checkbox in window.export_checks.values():
+        checkbox.setChecked(True)
+    app.processEvents()
+    window.grab().save(str(OUTPUT_DIR / "chronophoto-layer-export.png"), "PNG")
 
     window.close()
     print(OUTPUT_DIR.resolve())

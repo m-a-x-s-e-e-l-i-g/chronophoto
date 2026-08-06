@@ -147,6 +147,15 @@ QFrame#effectsPanel {
     border: 1px solid #303030;
     border-radius: 2px;
 }
+QFrame#exportOptionsPanel {
+    background: #101010;
+    border: 1px solid #424242;
+    border-radius: 2px;
+}
+QFrame#exportOptionsPanel QCheckBox {
+    font-size: 11px;
+    min-height: 24px;
+}
 QScrollArea#effectsScroll, QWidget#effectsContainer {
     background: #090909;
     border: none;
@@ -227,6 +236,13 @@ QPushButton#effectAddButton:hover, QPushButton#effectTextButton:hover {
 QComboBox#effectPreset {
     min-height: 26px;
     max-width: 126px;
+    padding: 0 7px;
+    font-size: 10px;
+}
+QComboBox#effectMode {
+    min-height: 26px;
+    min-width: 136px;
+    max-width: 184px;
     padding: 0 7px;
     font-size: 10px;
 }
