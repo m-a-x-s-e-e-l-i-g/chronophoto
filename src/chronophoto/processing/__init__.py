@@ -19,6 +19,13 @@ from chronophoto.processing.effects import (
     effect_preset,
     neutral_effect_track,
 )
+from chronophoto.processing.exports import (
+    ExportKind,
+    ExportLayers,
+    available_package_directory,
+    build_export_layers,
+    write_export_package,
+)
 from chronophoto.processing.sources import (
     MediaSequence,
     load_image_sequence,
@@ -39,11 +46,15 @@ __all__ = [
     "EFFECT_NEUTRAL_VALUES",
     "EffectKeyframe",
     "EffectTrack",
+    "ExportKind",
+    "ExportLayers",
     "MediaSequence",
     "align_sequence",
     "apply_background_effect_tracks",
+    "available_package_directory",
     "build_compose_cache",
     "blend_mode_rgb",
+    "build_export_layers",
     "compose_sequence",
     "effect_preset",
     "load_image_sequence",
@@ -52,4 +63,5 @@ __all__ = [
     "neutral_effect_track",
     "order_image_paths",
     "select_video_sequence",
+    "write_export_package",
 ]

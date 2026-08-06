@@ -9,6 +9,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
+from PIL import Image  # noqa: E402
 from PySide6.QtCore import QMimeData, QPoint, QPointF, QSignalBlocker, Qt, QUrl  # noqa: E402
 from PySide6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QImage, QWheelEvent  # noqa: E402
 from PySide6.QtWidgets import QApplication, QSlider  # noqa: E402
@@ -273,6 +274,103 @@ def test_background_effects_offer_the_same_effect_types_as_trail_effects() -> No
         "dithering",
         "halftone",
     ]
+    window.close()
+
+
+def test_export_outputs_allow_any_layer_combination() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = ChronophotoWindow()
+    path = Path("clip.mp4")
+    window.source = SourceState("video", [path], VideoInfo(path, 3.0, 640, 480, 30.0, 90))
+    window._set_loaded_state(True)
+
+    assert window._export_selections() == ("composite",)
+    assert window.export_button.text() == "Export composite"
+    window.export_options_button.click()
+    assert not window.export_options_panel.isHidden()
+
+    window.export_checks["combined_poses"].setChecked(True)
+    window.export_checks["individual_poses"].setChecked(True)
+    window.export_checks["background"].setChecked(True)
+    assert window._export_selections() == (
+        "composite",
+        "combined_poses",
+        "individual_poses",
+        "background",
+    )
+    assert window.export_options_button.text() == "OUTPUTS · 4 SELECTED ▾"
+    assert window.export_button.text() == "Export 4 outputs"
+    window.resize(960, 680)
+    window.show()
+    app.processEvents()
+    window._update_compact_workspace()
+    app.processEvents()
+    assert window.preview_canvas.height() >= 180
+    assert window.export_button.isVisible()
+    assert all(checkbox.isVisible() for checkbox in window.export_checks.values())
+
+    for checkbox in window.export_checks.values():
+        checkbox.setChecked(False)
+    assert window._export_selections() == ()
+    assert not window.export_button.isEnabled()
+    assert window.export_options_button.text() == "OUTPUTS · NONE ▾"
+    window.close()
+
+
+def test_layer_package_export_runs_once_and_writes_selected_outputs(monkeypatch, tmp_path) -> None:
+    _app = QApplication.instance() or QApplication([])
+    window = ChronophotoWindow()
+    path = Path("clip.mp4")
+    window.source = SourceState("video", [path], VideoInfo(path, 2.0, 48, 32, 2.0, 4))
+    window._set_loaded_state(True)
+    window.export_checks["composite"].setChecked(False)
+    window.export_checks["combined_poses"].setChecked(True)
+    window.export_checks["individual_poses"].setChecked(True)
+    window.export_checks["background"].setChecked(True)
+
+    frames: list[np.ndarray] = []
+    for index in range(4):
+        frame = np.full((32, 48, 3), (20, 40, 80), dtype=np.uint8)
+        frame[10:24, 4 + index * 9 : 12 + index * 9] = (220, 60, 30)
+        frames.append(frame)
+    sequence = MediaSequence(
+        frames,
+        [f"00:0{index}.00" for index in range(4)],
+        (48, 32),
+        [index / 2 for index in range(4)],
+    )
+    monkeypatch.setattr("chronophoto.ui.window.load_video_sequence", lambda *a, **k: sequence)
+    monkeypatch.setattr(
+        "chronophoto.ui.window.QFileDialog.getExistingDirectory",
+        lambda *a, **k: str(tmp_path),
+    )
+
+    def run_now(task, on_finished, detail):  # type: ignore[no-untyped-def]
+        del detail
+        on_finished(task(lambda value, message: None))
+
+    monkeypatch.setattr(window, "_start_task", run_now)
+    window.export_composite()
+
+    package = tmp_path / "clip-chronophoto-layers"
+    assert (package / "poses.png").is_file()
+    assert (package / "background.png").is_file()
+    assert len(list((package / "poses").glob("pose-*.png"))) == 4
+    assert not (package / "composite.png").exists()
+    assert window._last_export_path == package
+    assert window.status_text.text() == "EXPORT COMPLETE"
+
+    window.export_checks["individual_poses"].setChecked(False)
+    window.export_checks["background"].setChecked(False)
+    single_pose_path = tmp_path / "only-poses.png"
+    monkeypatch.setattr(
+        "chronophoto.ui.window.QFileDialog.getSaveFileName",
+        lambda *a, **k: (str(single_pose_path), "PNG image (*.png)"),
+    )
+    window.export_composite()
+    assert single_pose_path.is_file()
+    assert Image.open(single_pose_path).mode == "RGBA"
+    assert window._last_export_path == single_pose_path
     window.close()
 
 

@@ -80,7 +80,7 @@ your own footage first.
 - Pinch or two-finger scroll to zoom around the pointer, then drag to pan.
 - Apply opacity, Photoshop-style blend modes, saturation, blur, JPEG,
   stippling, dithering, and halftone independently to the trail or background.
-- Export full-resolution PNG, TIFF, or JPEG files.
+- Export a full-resolution image or a package of separate background and pose layers.
 - See whether the installed version is current or a new GitHub release exists.
 
 ## Shape the trail and background independently
@@ -124,6 +124,30 @@ plate layer blended over its original.
 *Trail lanes stay aligned with motion progress; background lanes use one exact
 value. The editors collapse independently so the photograph remains the main
 workspace.*
+
+## Export a finished image or editable layers
+
+The default **Export composite** action still writes one full-resolution PNG,
+TIFF, or JPEG. Open **Outputs** when you want reusable parts and select any
+combination of:
+
+- **Finished composite** — the complete Chronophoto image.
+- **Poses · combined transparent PNG** — every masked pose on one alpha layer.
+- **Poses · separate transparent PNGs** — one numbered PNG per masked pose.
+- **Background only** — the processed clean plate without poses.
+
+Single combined-pose and background outputs save directly as PNG files.
+Combinations and separate-pose batches are collected in a safely named
+`-chronophoto-layers` folder, so individual poses never scatter through an
+existing folder or overwrite an earlier package. Transparent pose files retain opacity,
+saturation, blur, JPEG, stippling, dithering, and halftone effects. Blend modes
+remain in the finished composite because a flat transparent PNG has no backdrop
+to blend with.
+
+![Chronophoto output selector with composite, transparent poses, individual poses, and background enabled](docs/images/chronophoto-layer-export.png)
+
+*The simple one-file export remains the default; layer controls stay folded
+away until they are needed.*
 
 ## Real-footage examples
 

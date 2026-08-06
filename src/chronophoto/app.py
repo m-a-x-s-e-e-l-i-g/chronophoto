@@ -147,6 +147,15 @@ QFrame#effectsPanel {
     border: 1px solid #303030;
     border-radius: 2px;
 }
+QFrame#exportOptionsPanel {
+    background: #101010;
+    border: 1px solid #424242;
+    border-radius: 2px;
+}
+QFrame#exportOptionsPanel QCheckBox {
+    font-size: 11px;
+    min-height: 24px;
+}
 QScrollArea#effectsScroll, QWidget#effectsContainer {
     background: #090909;
     border: none;

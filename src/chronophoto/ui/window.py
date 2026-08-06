@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QFileDialog,
     QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QListWidget,
@@ -47,14 +48,18 @@ from chronophoto import __version__
 from chronophoto.processing import (
     ComposeCache,
     ComposeSettings,
+    ExportKind,
     MediaSequence,
     align_sequence,
+    available_package_directory,
     build_compose_cache,
+    build_export_layers,
     compose_sequence,
     load_image_sequence,
     load_video_sequence,
     order_image_paths,
     select_video_sequence,
+    write_export_package,
 )
 from chronophoto.processing.sources import VideoInfo, probe_video
 from chronophoto.ui.effects import EffectTimelinePanel
@@ -551,8 +556,18 @@ class ChronophotoWindow(QMainWindow):
         layout.addWidget(self.trail_effect_timeline)
         layout.addWidget(self.background_effect_timeline)
 
+        self.export_options_panel = self._build_export_options_panel()
+        self.export_options_panel.hide()
+        layout.addWidget(self.export_options_panel)
+
         actions = QHBoxLayout()
         actions.setSpacing(9)
+        self.export_options_button = QPushButton("OUTPUTS · COMPOSITE")
+        self.export_options_button.setObjectName("quietButton")
+        self.export_options_button.setCheckable(True)
+        self.export_options_button.setAccessibleName("Choose export outputs")
+        self.export_options_button.clicked.connect(self._toggle_export_options)
+        actions.addWidget(self.export_options_button)
         self.export_button = QPushButton("Export composite")
         self.export_button.setObjectName("primaryButton")
         self.export_button.clicked.connect(self.export_composite)
@@ -560,6 +575,42 @@ class ChronophotoWindow(QMainWindow):
         actions.addWidget(self.export_button)
         layout.addLayout(actions)
         return workspace
+
+    def _build_export_options_panel(self) -> QFrame:
+        panel = QFrame()
+        panel.setObjectName("exportOptionsPanel")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(12, 9, 12, 10)
+        layout.setSpacing(7)
+        heading = QLabel("EXPORT OUTPUTS")
+        heading.setObjectName("controlLabel")
+        note = QLabel(
+            "Choose any combination. Batches use a named PNG folder. Transparent poses "
+            "keep pixel effects; blend modes stay in the composite."
+        )
+        note.setObjectName("effectEmpty")
+        note.setWordWrap(True)
+        layout.addWidget(heading)
+        layout.addWidget(note)
+
+        choices = QGridLayout()
+        choices.setHorizontalSpacing(18)
+        choices.setVerticalSpacing(6)
+        labels: tuple[tuple[ExportKind, str], ...] = (
+            ("composite", "Finished composite"),
+            ("combined_poses", "Poses · combined transparent PNG"),
+            ("individual_poses", "Poses · separate transparent PNGs"),
+            ("background", "Background only"),
+        )
+        self.export_checks: dict[ExportKind, QCheckBox] = {}
+        for index, (kind, label) in enumerate(labels):
+            checkbox = QCheckBox(label)
+            checkbox.setChecked(kind == "composite")
+            checkbox.toggled.connect(self._export_choices_changed)
+            choices.addWidget(checkbox, index // 2, index % 2)
+            self.export_checks[kind] = checkbox
+        layout.addLayout(choices)
+        return panel
 
     def _build_inspector(self) -> QWidget:
         scroll = QScrollArea()
@@ -1514,6 +1565,9 @@ class ChronophotoWindow(QMainWindow):
     def export_composite(self) -> None:
         if not self.source or self._thread:
             return
+        selections = self._export_selections()
+        if not selections:
+            return
         self.preview_debounce.stop()
         self._pending_preview = False
         try:
@@ -1523,17 +1577,43 @@ class ChronophotoWindow(QMainWindow):
             self.status_detail.setText(str(exc))
             return
         last_dir = Path(str(self.settings_store.value("last_export_dir", str(Path.home()))))
-        suggested = last_dir / f"{request.paths[0].stem}-chronophoto.png"
-        path, selected_filter = QFileDialog.getSaveFileName(
-            self,
-            "Export full-resolution composite",
-            str(suggested),
-            "PNG image (*.png);;TIFF image (*.tif *.tiff);;JPEG image (*.jpg *.jpeg)",
-        )
-        if not path:
-            return
-        export_path = self._export_path_with_filter(Path(path), selected_filter)
-        self.settings_store.setValue("last_export_dir", str(export_path.parent))
+        layer_export = selections != ("composite",)
+        package_export = len(selections) > 1 or selections == ("individual_poses",)
+        if package_export:
+            selected_directory = QFileDialog.getExistingDirectory(
+                self,
+                "Choose folder for the layer package",
+                str(last_dir),
+            )
+            if not selected_directory:
+                return
+            export_path = available_package_directory(
+                Path(selected_directory), request.paths[0].stem
+            )
+            self.settings_store.setValue("last_export_dir", str(export_path.parent))
+        else:
+            output_kind = selections[0]
+            suffixes = {
+                "composite": "chronophoto",
+                "combined_poses": "poses",
+                "background": "background",
+            }
+            suggested = last_dir / f"{request.paths[0].stem}-{suffixes[output_kind]}.png"
+            filters = (
+                "PNG image (*.png);;TIFF image (*.tif *.tiff);;JPEG image (*.jpg *.jpeg)"
+                if output_kind == "composite"
+                else "PNG image (*.png)"
+            )
+            path, selected_filter = QFileDialog.getSaveFileName(
+                self,
+                "Export full-resolution output",
+                str(suggested),
+                filters,
+            )
+            if not path:
+                return
+            export_path = self._export_path_with_filter(Path(path), selected_filter)
+            self.settings_store.setValue("last_export_dir", str(export_path.parent))
 
         def task(progress: Callable[[int, str], None]):
             progress(2, "Reading full-resolution source")
@@ -1553,9 +1633,11 @@ class ChronophotoWindow(QMainWindow):
                 )
             frames = sequence.frames
             timestamps = sequence.timestamps
+            labels = sequence.labels
             if request.kind == "video" and request.enabled_video_indices is not None:
                 enabled = [index for index in request.enabled_video_indices if index < len(frames)]
                 frames = [frames[index] for index in enabled]
+                labels = [labels[index] for index in enabled]
                 if timestamps is not None:
                     timestamps = [timestamps[index] for index in enabled]
             aligned = align_sequence(
@@ -1563,17 +1645,59 @@ class ChronophotoWindow(QMainWindow):
                 request.alignment,
                 progress=lambda value, message: progress(30 + int(value * 0.12), message),
             )
+            effect_progress = self._normalized_effect_progress(
+                timestamps,
+                len(aligned),
+                request.start,
+                request.end,
+            )
+            if layer_export:
+                analysis = build_compose_cache(
+                    aligned,
+                    request.settings,
+                    progress=lambda value, message: progress(42 + int(value * 0.28), message),
+                )
+                result, masks = compose_sequence(
+                    aligned,
+                    request.settings,
+                    progress=lambda value, message: progress(70 + int(value * 0.22), message),
+                    cache=analysis,
+                    effect_progress=effect_progress,
+                    effect_pixel_scale=1.0,
+                )
+                progress(93, "Building transparent layers")
+                layers = build_export_layers(
+                    aligned,
+                    masks,
+                    analysis.background,
+                    request.settings,
+                    list(effect_progress),
+                    pixel_scale=1.0,
+                )
+                progress(97, "Writing transparent layers")
+                if package_export:
+                    written = write_export_package(
+                        export_path,
+                        selections,
+                        composite=result,
+                        layers=layers,
+                        labels=labels,
+                    )
+                    return export_path, result, len(written)
+                pixels = (
+                    layers.combined_poses
+                    if selections == ("combined_poses",)
+                    else layers.background
+                )
+                Image.fromarray(pixels).save(export_path, compress_level=6)
+                return export_path, result, 1
+
             result, _ = compose_sequence(
                 aligned,
                 request.settings,
                 progress=lambda value, message: progress(42 + int(value * 0.53), message),
                 return_masks=False,
-                effect_progress=self._normalized_effect_progress(
-                    timestamps,
-                    len(aligned),
-                    request.start,
-                    request.end,
-                ),
+                effect_progress=effect_progress,
                 effect_pixel_scale=1.0,
             )
             progress(97, "Writing image")
@@ -1585,20 +1709,62 @@ class ChronophotoWindow(QMainWindow):
                 image.save(export_path, quality=95, subsampling=0)
             else:
                 image.save(export_path, compress_level=6)
-            return export_path, result
+            return export_path, result, 1
 
         self._start_task(task, self._export_finished, "Composing full resolution")
 
     @Slot(object)
     def _export_finished(self, payload: object) -> None:
-        path, result = payload  # type: ignore[misc]
+        path, result, output_count = payload  # type: ignore[misc]
         self.preview_result = result
         self._preview_dirty = False
         self._last_export_path = Path(path)
         self._set_preview_mode("composite")
         self.result_meta.setText(f"Full resolution · {result.shape[1]} × {result.shape[0]}")
         self.open_export_button.show()
-        self._finish_task("EXPORT COMPLETE", Path(path).name)
+        detail = Path(path).name
+        if Path(path).is_dir():
+            detail = f"{output_count} PNG files · {detail}"
+        self._finish_task("EXPORT COMPLETE", detail)
+
+    @Slot()
+    def _toggle_export_options(self) -> None:
+        expanded = self.export_options_button.isChecked()
+        self.export_options_panel.setVisible(expanded)
+        self._sync_export_controls()
+        self._update_compact_workspace()
+
+    @Slot()
+    def _export_choices_changed(self) -> None:
+        self._sync_export_controls()
+
+    def _export_selections(self) -> tuple[ExportKind, ...]:
+        return tuple(kind for kind, checkbox in self.export_checks.items() if checkbox.isChecked())
+
+    def _sync_export_controls(self, *, busy: bool | None = None) -> None:
+        selections = self._export_selections()
+        labels = {
+            "composite": "COMPOSITE",
+            "combined_poses": "POSES",
+            "individual_poses": "SEPARATE POSES",
+            "background": "BACKGROUND",
+        }
+        if not selections:
+            summary = "NONE"
+        elif len(selections) == 1:
+            summary = labels[selections[0]]
+        else:
+            summary = f"{len(selections)} SELECTED"
+        marker = "▾" if self.export_options_button.isChecked() else "▸"
+        self.export_options_button.setText(f"OUTPUTS · {summary} {marker}")
+        if selections == ("composite",):
+            self.export_button.setText("Export composite")
+        else:
+            count = len(selections)
+            self.export_button.setText(f"Export {count} output{'s' if count != 1 else ''}")
+        is_busy = self._thread is not None if busy is None else busy
+        enabled = self.source is not None and bool(selections) and not is_busy
+        self.export_button.setEnabled(enabled)
 
     def _start_task(
         self,
@@ -1687,6 +1853,7 @@ class ChronophotoWindow(QMainWindow):
             self.move_up_button,
             self.move_down_button,
             self.reset_button,
+            self.export_options_button,
         ):
             control.setEnabled(
                 not busy
@@ -1699,6 +1866,9 @@ class ChronophotoWindow(QMainWindow):
         self.all_frames.setEnabled(is_video)
         self.range_slider.setEnabled(is_video)
         self.frame_list.setEnabled(loaded)
+        for checkbox in self.export_checks.values():
+            checkbox.setEnabled(loaded and not busy)
+        self._sync_export_controls(busy=busy)
         self.cancel_button.setVisible(busy)
         self.cancel_button.setEnabled(busy)
 
@@ -1712,7 +1882,9 @@ class ChronophotoWindow(QMainWindow):
         self.trail_effect_timeline.add_button.setEnabled(loaded)
         self.background_effect_timeline.add_button.setEnabled(loaded)
         self.pose_navigation.setVisible(loaded)
-        self.export_button.setEnabled(loaded)
+        self.export_options_button.setEnabled(loaded)
+        for checkbox in self.export_checks.values():
+            checkbox.setEnabled(loaded)
         self.reset_button.setEnabled(loaded)
         self.threshold.setEnabled(loaded)
         self.feather.setEnabled(loaded)
@@ -1730,6 +1902,7 @@ class ChronophotoWindow(QMainWindow):
         self.photo_order_control.setVisible(is_photo)
         self.move_up_button.setVisible(is_photo)
         self.move_down_button.setVisible(is_photo)
+        self._sync_export_controls(busy=False)
 
     def _schedule_preview(self) -> None:
         if self._loading_source or not self.source:
@@ -1945,7 +2118,12 @@ class ChronophotoWindow(QMainWindow):
 
     def _open_export_folder(self) -> None:
         if self._last_export_path:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._last_export_path.parent)))
+            target = (
+                self._last_export_path
+                if self._last_export_path.is_dir()
+                else self._last_export_path.parent
+            )
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
 
     @staticmethod
     def _friendly_error(message: str) -> str:
@@ -2000,7 +2178,7 @@ class ChronophotoWindow(QMainWindow):
         has_effects = bool(
             self.trail_effect_timeline.tracks() or self.background_effect_timeline.tracks()
         )
-        compact = self.height() < 760 and has_effects
+        compact = self.height() < 760 and (has_effects or self.export_options_panel.isVisible())
         self.preview_canvas.setMinimumSize(400, 180 if compact else 260)
         self.range_slider.set_compact(compact)
         self.trail_effect_timeline.set_compact(compact)

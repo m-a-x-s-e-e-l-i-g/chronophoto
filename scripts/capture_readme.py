@@ -113,6 +113,13 @@ def main() -> int:
     app.processEvents()
     window.grab().save(str(OUTPUT_DIR / "chronophoto-effect-timeline.png"), "PNG")
 
+    window.background_effect_timeline.set_expanded(False)
+    window.export_options_button.click()
+    for checkbox in window.export_checks.values():
+        checkbox.setChecked(True)
+    app.processEvents()
+    window.grab().save(str(OUTPUT_DIR / "chronophoto-layer-export.png"), "PNG")
+
     window.close()
     print(OUTPUT_DIR.resolve())
     return 0
