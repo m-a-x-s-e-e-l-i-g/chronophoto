@@ -262,6 +262,45 @@ def test_opacity_effect_uses_explicit_normalized_frame_progress() -> None:
     assert returned_masks[0][90, 36] == 1.0
 
 
+def test_blend_mode_uses_the_existing_composite_as_its_backdrop() -> None:
+    background = np.full((48, 80, 3), (80, 120, 160), dtype=np.uint8)
+    frames = [background.copy(), background.copy()]
+    frames[0][12:32, 10:26] = (210, 70, 40)
+    frames[1][12:32, 48:64] = (40, 200, 100)
+    masks = [np.zeros((48, 80), dtype=np.uint8) for _ in frames]
+    masks[0][12:32, 10:26] = 255
+    masks[1][12:32, 48:64] = 255
+    full = (EffectKeyframe(0.0, 100.0), EffectKeyframe(1.0, 100.0))
+    track = EffectTrack("blend_mode", full, option="multiply")
+
+    result, _ = compose_sequence(
+        frames,
+        ComposeSettings(effect_tracks=(track,)),
+        cache=ComposeCache(background, masks),
+    )
+
+    expected_first = np.array((80, 120, 160)) * np.array((210, 70, 40)) / 255.0
+    expected_second = np.array((80, 120, 160)) * np.array((40, 200, 100)) / 255.0
+    assert result[20, 18] == pytest.approx(expected_first, abs=1.0)
+    assert result[20, 56] == pytest.approx(expected_second, abs=1.0)
+    assert np.array_equal(result[2, 2], background[2, 2])
+
+
+def test_zero_blend_strength_is_identical_to_normal_compositing() -> None:
+    frames = moving_subject_frames(3)
+    cache = build_compose_cache(frames, ComposeSettings())
+    zero = (EffectKeyframe(0.0, 0.0), EffectKeyframe(1.0, 0.0))
+
+    normal, _ = compose_sequence(frames, ComposeSettings(), cache=cache)
+    blended, _ = compose_sequence(
+        frames,
+        ComposeSettings(effect_tracks=(EffectTrack("blend_mode", zero, option="screen"),)),
+        cache=cache,
+    )
+
+    assert np.array_equal(blended, normal)
+
+
 @pytest.mark.parametrize("smear_style", ["photographic", "dense_clones"])
 def test_effects_apply_to_generated_smear_pixels(smear_style: str) -> None:
     frames = moving_subject_frames(4)
@@ -282,6 +321,34 @@ def test_effects_apply_to_generated_smear_pixels(smear_style: str) -> None:
     background = build_background(frames, "median")
 
     assert np.array_equal(result, background)
+
+
+@pytest.mark.parametrize("smear_style", ["photographic", "dense_clones"])
+def test_blend_modes_apply_to_generated_smear_layers(smear_style: str) -> None:
+    frames = moving_subject_frames(4)
+    base_settings = ComposeSettings(
+        threshold=18,
+        feather=0,
+        background="median",
+        smear_style=smear_style,
+    )
+    cache = build_compose_cache(frames, base_settings)
+    full = (EffectKeyframe(0.0, 100.0), EffectKeyframe(1.0, 100.0))
+
+    normal, _ = compose_sequence(frames, base_settings, cache=cache)
+    difference, _ = compose_sequence(
+        frames,
+        ComposeSettings(
+            threshold=18,
+            feather=0,
+            background="median",
+            smear_style=smear_style,
+            effect_tracks=(EffectTrack("blend_mode", full, option="difference"),),
+        ),
+        cache=cache,
+    )
+
+    assert not np.array_equal(difference, normal)
 
 
 def test_effect_progress_requires_one_chronological_value_per_frame() -> None:

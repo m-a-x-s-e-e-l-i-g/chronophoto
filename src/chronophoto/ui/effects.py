@@ -4,6 +4,7 @@ from PySide6.QtCore import QPoint, QPointF, QRectF, QSignalBlocker, Qt, Signal
 from PySide6.QtGui import QColor, QKeyEvent, QMouseEvent, QPainter, QPen, QWheelEvent
 from PySide6.QtWidgets import (
     QCheckBox,
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -17,6 +18,8 @@ from PySide6.QtWidgets import (
 )
 
 from chronophoto.processing import (
+    BLEND_MODE_LABELS,
+    BLEND_MODES,
     EFFECT_KINDS,
     EFFECT_LABELS,
     EffectKeyframe,
@@ -333,9 +336,11 @@ class EffectLane(QFrame):
         self.preset = ScrollSafeComboBox()
         self.preset.setObjectName("effectPreset")
         self.preset.addItem("CUSTOM", "custom")
+        self.preset.addItem("100 CONSTANT", "full")
         self.preset.addItem("0 → 100 → 0", "rise_fall")
         self.preset.addItem("0 → 100", "rise")
         self.preset.addItem("100 → 0", "fall")
+        self.preset.setFixedWidth(126)
         self.preset.currentIndexChanged.connect(self._preset_changed)
         self.reset_button = QPushButton("RESET")
         self.reset_button.setObjectName("effectTextButton")
@@ -346,6 +351,7 @@ class EffectLane(QFrame):
         self.more_button = QToolButton()
         self.more_button.setObjectName("effectMoreButton")
         self.more_button.setText("···")
+        self.more_button.setFixedWidth(29)
         self.more_button.setToolTip("More effect actions")
         self.more_button.clicked.connect(self._show_more_menu)
         self.more_button.hide()
@@ -366,24 +372,48 @@ class EffectLane(QFrame):
         details_layout.setSpacing(4)
         value_row = QHBoxLayout()
         value_row.setSpacing(7)
-        position_label = QLabel("POSITION")
-        position_label.setObjectName("effectMeta")
+        self.position_label = QLabel("POSITION")
+        self.position_label.setObjectName("effectMeta")
         self.position_spin = ScrollSafeSpinBox()
         self.position_spin.setObjectName("effectKeyframeSpin")
+        self.position_spin.setAccessibleName("Keyframe position")
         self.position_spin.setRange(0, 100)
         self.position_spin.setSuffix("%")
         self.position_spin.valueChanged.connect(self._numeric_keyframe_changing)
-        value_label = QLabel("VALUE")
-        value_label.setObjectName("effectMeta")
+        self.value_label = QLabel("VALUE")
+        self.value_label.setObjectName("effectMeta")
         self.value_spin = ScrollSafeSpinBox()
         self.value_spin.setObjectName("effectKeyframeSpin")
+        self.value_spin.setAccessibleName("Keyframe value")
         self.value_spin.setRange(0, 100)
         self.value_spin.setSuffix("%")
         self.value_spin.valueChanged.connect(self._numeric_keyframe_changing)
-        value_row.addWidget(position_label)
+        value_row.addWidget(self.position_label)
         value_row.addWidget(self.position_spin)
-        value_row.addWidget(value_label)
+        value_row.addWidget(self.value_label)
         value_row.addWidget(self.value_spin)
+        self.mode_combo: ScrollSafeComboBox | None = None
+        self.mode_label: QLabel | None = None
+        if track.kind == "blend_mode":
+            self.mode_label = QLabel("MODE")
+            self.mode_label.setObjectName("effectMeta")
+            self.mode_combo = ScrollSafeComboBox()
+            self.mode_combo.setObjectName("effectMode")
+            self.mode_combo.setAccessibleName("Blend mode")
+            self.mode_combo.setFixedWidth(184)
+            self.mode_combo.setMinimumContentsLength(16)
+            self.mode_combo.setSizeAdjustPolicy(
+                QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+            )
+            self.mode_combo.setToolTip("Blend each masked pose with the composite underneath it")
+            for index, mode in enumerate(BLEND_MODES):
+                self.mode_combo.addItem(BLEND_MODE_LABELS[mode].upper(), mode)
+                if index in {1, 6, 11, 18, 22}:
+                    self.mode_combo.insertSeparator(self.mode_combo.count())
+            self.mode_combo.setCurrentIndex(self.mode_combo.findData(track.option))
+            self.mode_combo.currentIndexChanged.connect(self._mode_changed)
+            value_row.addWidget(self.mode_label)
+            value_row.addWidget(self.mode_combo)
         value_row.addStretch()
         self.amount_spin: ScrollSafeSpinBox | None = None
         if track.kind in {"blur", "stippling", "dithering", "halftone"}:
@@ -413,6 +443,9 @@ class EffectLane(QFrame):
         details_layout.addWidget(self.graph)
         layout.addWidget(self.details)
         self.graph._emit_selection()
+        if all(point.value == 100.0 for point in track.keyframes):
+            with QSignalBlocker(self.preset):
+                self.preset.setCurrentIndex(self.preset.findData("full"))
         self._sync_enabled_style()
 
     @property
@@ -425,12 +458,14 @@ class EffectLane(QFrame):
         keyframes: tuple[EffectKeyframe, ...] | None = None,
         enabled: bool | None = None,
         amount: float | None = None,
+        option: str | None = None,
     ) -> EffectTrack:
         self._track = EffectTrack(
             self._track.kind,
             self._track.keyframes if keyframes is None else keyframes,
             self._track.enabled if enabled is None else enabled,
             self._track.amount if amount is None else amount,
+            self._track.option if option is None else option,
         )
         return self._track
 
@@ -477,6 +512,9 @@ class EffectLane(QFrame):
         if self.amount_spin is not None:
             with QSignalBlocker(self.amount_spin):
                 self.amount_spin.setValue(round(self._track.amount))
+        if self.mode_combo is not None:
+            with QSignalBlocker(self.mode_combo):
+                self.mode_combo.setCurrentIndex(self.mode_combo.findData(self._track.option))
         with QSignalBlocker(self.preset):
             self.preset.setCurrentIndex(0)
         self.graph.set_keyframes(self._track.keyframes)
@@ -485,6 +523,12 @@ class EffectLane(QFrame):
 
     def _amount_changed(self, value: int) -> None:
         self._replace_track(amount=float(value))
+        self.track_committed.emit(self._track)
+
+    def _mode_changed(self) -> None:
+        if self.mode_combo is None or self.mode_combo.currentData() is None:
+            return
+        self._replace_track(option=str(self.mode_combo.currentData()))
         self.track_committed.emit(self._track)
 
     def _keyframes_changing(self, keyframes: object) -> None:
@@ -515,10 +559,25 @@ class EffectLane(QFrame):
 
     def set_compact(self, compact: bool) -> None:
         self.graph.setMinimumHeight(50 if compact else 60)
-        narrow = self.width() < 650
+        narrow = compact or self.window().width() < 1100 or self.width() < 650
         self.reset_button.setVisible(not narrow)
         self.remove_button.setVisible(not narrow)
         self.more_button.setVisible(narrow)
+        self.preset.setFixedWidth(112 if narrow else 126)
+        self.position_label.setVisible(not narrow)
+        self.value_label.setVisible(not narrow)
+        self.position_spin.setPrefix("P " if narrow else "")
+        self.value_spin.setPrefix("V " if narrow else "")
+        self.position_spin.setFixedWidth(74 if narrow else 58)
+        self.value_spin.setFixedWidth(74 if narrow else 58)
+        if self.mode_label is not None:
+            self.mode_label.setVisible(not narrow)
+        if self.mode_combo is not None:
+            self.mode_combo.setFixedWidth(144 if narrow else 184)
+        self.layout().invalidate()
+        self.updateGeometry()
+        if self.parentWidget() is not None:
+            self.parentWidget().updateGeometry()
 
     def resizeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         self.set_compact(self.window().height() < 760)
@@ -592,6 +651,8 @@ class EffectTimelinePanel(QFrame):
         self.scroll.setMaximumHeight(148 if compact else 222)
         for lane in self._lanes:
             lane.set_compact(compact)
+        self.lane_layout.invalidate()
+        self.lane_container.updateGeometry()
         self.setMinimumHeight(132 if self._lanes else 0)
 
     def add_effect(self, kind: str) -> EffectLane:
@@ -601,7 +662,10 @@ class EffectTimelinePanel(QFrame):
         if existing is not None:
             existing.show()
             return existing
-        lane = EffectLane(neutral_effect_track(kind))
+        track = neutral_effect_track(kind)
+        if kind == "blend_mode":
+            track = effect_preset(track, "full")
+        lane = EffectLane(track)
         lane.track_changing.connect(lambda _track: self.tracks_changing.emit())
         lane.track_committed.connect(self._lane_committed)
         lane.remove_requested.connect(self._remove_lane)

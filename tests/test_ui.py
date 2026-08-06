@@ -15,7 +15,7 @@ from PySide6.QtWidgets import QApplication, QSlider  # noqa: E402
 
 from chronophoto import __version__  # noqa: E402
 from chronophoto.app import application_stylesheet, main  # noqa: E402
-from chronophoto.processing import EffectKeyframe  # noqa: E402
+from chronophoto.processing import BLEND_MODES, EffectKeyframe  # noqa: E402
 from chronophoto.processing.sources import MediaSequence, VideoInfo  # noqa: E402
 from chronophoto.ui.effects import EffectKeyframeGraph  # noqa: E402
 from chronophoto.ui.widgets import (  # noqa: E402
@@ -195,6 +195,7 @@ def test_effect_timeline_adds_independent_neutral_tracks() -> None:
     window._set_loaded_state(True)
     for kind in (
         "opacity",
+        "blend_mode",
         "saturation",
         "blur",
         "jpeg_quality",
@@ -207,6 +208,7 @@ def test_effect_timeline_adds_independent_neutral_tracks() -> None:
     tracks = window.effect_timeline.tracks()
     assert [track.kind for track in tracks] == [
         "opacity",
+        "blend_mode",
         "saturation",
         "blur",
         "jpeg_quality",
@@ -214,7 +216,7 @@ def test_effect_timeline_adds_independent_neutral_tracks() -> None:
         "dithering",
         "halftone",
     ]
-    assert [track.value_at(0.5) for track in tracks] == [100, 100, 0, 100, 0, 0, 0]
+    assert [track.value_at(0.5) for track in tracks] == [100, 100, 100, 0, 100, 0, 0, 0]
     assert window._settings_snapshot().effect_tracks == tracks
     window.close()
 
@@ -232,6 +234,40 @@ def test_effect_lane_presets_and_bypass_preserve_keyframes() -> None:
     assert window.effect_timeline.summary.text().startswith("0 ACTIVE / 1 TRACKS")
     lane.enabled_box.setChecked(True)
     assert lane.track.enabled
+    window.close()
+
+
+def test_blend_mode_lane_exposes_all_modes_and_commits_selection() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = ChronophotoWindow()
+    lane = window.effect_timeline.add_effect("blend_mode")
+    assert lane.mode_combo is not None
+    available = tuple(
+        lane.mode_combo.itemData(index)
+        for index in range(lane.mode_combo.count())
+        if lane.mode_combo.itemData(index) is not None
+    )
+
+    assert available == BLEND_MODES
+    assert lane.track.option == "multiply"
+    assert lane.track.value_at(0.5) == 100.0
+    lane.mode_combo.setCurrentIndex(lane.mode_combo.findData("soft_light"))
+    assert lane.track.option == "soft_light"
+
+    initial_index = lane.mode_combo.currentIndex()
+    event = QWheelEvent(
+        QPointF(10, 10),
+        QPointF(10, 10),
+        QPoint(),
+        QPoint(0, -120),
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.NoModifier,
+        Qt.ScrollPhase.ScrollUpdate,
+        False,
+    )
+    app.sendEvent(lane.mode_combo, event)
+    assert lane.mode_combo.currentIndex() == initial_index
+    assert not event.isAccepted()
     window.close()
 
 
@@ -320,7 +356,7 @@ def test_effect_editor_has_a_usable_compact_window_state() -> None:
     window.source = SourceState("video", [path], VideoInfo(path, 10.0, 1920, 1080, 30.0, 300))
     window._set_loaded_state(True)
     with QSignalBlocker(window.effect_timeline):
-        lane = window.effect_timeline.add_effect("opacity")
+        lane = window.effect_timeline.add_effect("blend_mode")
     window.resize(960, 680)
     window.show()
     app.processEvents()
@@ -332,6 +368,10 @@ def test_effect_editor_has_a_usable_compact_window_state() -> None:
     assert window.preview_mode_buttons["composite"].isVisible()
     assert window.preview_canvas.height() >= 180
     assert lane.graph.height() >= 50
+    assert lane.more_button.isVisible()
+    assert lane.reset_button.isHidden()
+    assert lane.mode_combo is not None and lane.mode_combo.isVisible()
+    assert lane.width() <= window.effect_timeline.scroll.viewport().width()
     assert window.export_button.isVisible()
 
     window.resize(1380, 880)

@@ -78,8 +78,8 @@ your own footage first.
 - Connect poses with **Photographic stretch** or **Dense cloned copies**, or
   leave smear appearance set to **None** for distinct poses.
 - Pinch or two-finger scroll to zoom around the pointer, then drag to pan.
-- Stack keyframed opacity, saturation, blur, JPEG, stippling, dithering, and
-  halftone effects across the subject's motion.
+- Stack keyframed opacity, Photoshop-style blend modes, saturation, blur, JPEG,
+  stippling, dithering, and halftone effects across the subject's motion.
 - Export full-resolution PNG, TIFF, or JPEG files.
 - See whether the installed version is current or a new GitHub release exists.
 
@@ -95,6 +95,10 @@ motion progress, so the curve survives changes to the in/out range, pose count,
 disabled frames, and overlap order.
 
 - **Opacity** fades copies in and out.
+- **Blend mode** mixes each pose with the composite beneath it. Choose from 27
+  familiar modes including Multiply, Screen, Overlay, Soft Light, Difference,
+  Hue, Color, and Luminosity, then keyframe the strength from Normal to the
+  selected mode.
 - **Saturation** moves between grayscale and the original colour.
 - **Blur** uses a configurable maximum radius in output pixels.
 - **JPEG quality** runs from visibly damaged at 0% to clean at 100%.

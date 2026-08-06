@@ -6,12 +6,15 @@ from chronophoto.processing.compositor import (
     compose_sequence,
 )
 from chronophoto.processing.effects import (
+    BLEND_MODE_LABELS,
+    BLEND_MODES,
     EFFECT_DEFAULT_AMOUNTS,
     EFFECT_KINDS,
     EFFECT_LABELS,
     EFFECT_NEUTRAL_VALUES,
     EffectKeyframe,
     EffectTrack,
+    blend_mode_rgb,
     effect_preset,
     neutral_effect_track,
 )
@@ -25,6 +28,8 @@ from chronophoto.processing.sources import (
 )
 
 __all__ = [
+    "BLEND_MODE_LABELS",
+    "BLEND_MODES",
     "ComposeCache",
     "ComposeSettings",
     "EFFECT_DEFAULT_AMOUNTS",
@@ -36,6 +41,7 @@ __all__ = [
     "MediaSequence",
     "align_sequence",
     "build_compose_cache",
+    "blend_mode_rgb",
     "compose_sequence",
     "effect_preset",
     "load_image_sequence",

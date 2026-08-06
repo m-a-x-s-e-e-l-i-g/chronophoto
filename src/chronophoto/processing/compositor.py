@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 from numpy.typing import NDArray
 
-from chronophoto.processing.effects import EffectTrack, apply_effect_tracks
+from chronophoto.processing.effects import EffectTrack, apply_effect_tracks, blend_mode_rgb
 
 ImageArray = NDArray[np.uint8]
 ProgressCallback = Callable[[int, str], None]
@@ -288,6 +288,8 @@ def _blend_pose(
     result: NDArray[np.float32],
     frame: ImageArray,
     mask: NDArray[np.float32],
+    blend_tracks: Sequence[EffectTrack] = (),
+    effect_progress: float = 0.0,
 ) -> NDArray[np.float32]:
     points = cv2.findNonZero((mask > 0.001).astype(np.uint8))
     if points is None:
@@ -295,9 +297,51 @@ def _blend_pose(
     x, y, width, height = cv2.boundingRect(points)
     target = result[y : y + height, x : x + width]
     source = frame[y : y + height, x : x + width].astype(np.float32)
-    alpha = mask[y : y + height, x : x + width, None]
-    target[:] = source * alpha + target * (1.0 - alpha)
+    alpha = mask[y : y + height, x : x + width]
+    target[:] = _blend_region(
+        target,
+        source,
+        alpha,
+        blend_tracks,
+        effect_progress,
+        origin=(x, y),
+    )
     return result
+
+
+def _blend_region(
+    target: NDArray[np.float32],
+    source: NDArray[np.float32],
+    alpha: NDArray[np.float32],
+    blend_tracks: Sequence[EffectTrack],
+    effect_progress: float,
+    *,
+    origin: tuple[int, int] = (0, 0),
+) -> NDArray[np.float32]:
+    """Composite one masked layer, optionally mixing in true backdrop blend modes."""
+
+    alpha_3d = np.clip(alpha, 0.0, 1.0)[..., None]
+    normal = source * alpha_3d + target * (1.0 - alpha_3d)
+    composite = normal
+    for track in blend_tracks:
+        if not track.enabled or track.kind != "blend_mode":
+            continue
+        strength = track.value_at(effect_progress) / 100.0
+        if strength <= 0.00001 or track.option == "normal":
+            continue
+        if track.option == "dissolve":
+            height, width = alpha.shape
+            y, x = np.indices((height, width), dtype=np.uint32)
+            x += np.uint32(max(0, origin[0]))
+            y += np.uint32(max(0, origin[1]))
+            noise = ((x * 1597334677) ^ (y * 3812015801)) & 0xFFFF
+            visible = noise.astype(np.float32) / 65535.0 < alpha
+            mode_composite = np.where(visible[..., None], source, target)
+        else:
+            mode_source = blend_mode_rgb(target, source, track.option)
+            mode_composite = mode_source * alpha_3d + target * (1.0 - alpha_3d)
+        composite = composite * (1.0 - strength) + mode_composite * strength
+    return composite
 
 
 def _mask_centroid(mask: NDArray[np.float32]) -> tuple[float, float] | None:
@@ -406,6 +450,8 @@ def _apply_motion_ribbon(
     frames: Sequence[ImageArray],
     masks: Sequence[NDArray[np.float32]],
     progress: ProgressCallback | None,
+    blend_tracks: Sequence[EffectTrack] = (),
+    effect_progress: Sequence[float] = (),
 ) -> NDArray[np.float32]:
     """Build pairwise silhouette connectors underneath the original poses."""
 
@@ -427,17 +473,35 @@ def _apply_motion_ribbon(
             )
             if pair is not None:
                 pair_color, pair_alpha = pair
-                color_sum[top:bottom, left:right] += pair_color * pair_alpha[..., None]
-                weight_sum[top:bottom, left:right] += pair_alpha
-                np.maximum(
-                    alpha_union[top:bottom, left:right],
-                    pair_alpha,
-                    out=alpha_union[top:bottom, left:right],
-                )
+                if blend_tracks:
+                    ribbon_alpha = cv2.GaussianBlur(pair_alpha, (3, 3), 0)
+                    ribbon_alpha = np.clip(ribbon_alpha * 0.90, 0.0, 0.90)
+                    pair_progress = (
+                        (effect_progress[index] + effect_progress[index + 1]) / 2.0
+                        if effect_progress
+                        else (index + 0.5) / max(1, len(frames) - 1)
+                    )
+                    target = result[top:bottom, left:right]
+                    target[:] = _blend_region(
+                        target,
+                        pair_color,
+                        ribbon_alpha,
+                        blend_tracks,
+                        pair_progress,
+                        origin=(left, top),
+                    )
+                else:
+                    color_sum[top:bottom, left:right] += pair_color * pair_alpha[..., None]
+                    weight_sum[top:bottom, left:right] += pair_alpha
+                    np.maximum(
+                        alpha_union[top:bottom, left:right],
+                        pair_alpha,
+                        out=alpha_union[top:bottom, left:right],
+                    )
         value = 60 + int(((index + 1) / pair_total) * 20)
         _notify(progress, value, f"Connecting silhouette {index + 1} of {pair_total}")
 
-    if not np.any(alpha_union):
+    if blend_tracks or not np.any(alpha_union):
         return result
     ribbon_source = color_sum / np.maximum(weight_sum[..., None], 0.001)
     ribbon_alpha = cv2.GaussianBlur(alpha_union, (3, 3), 0)
@@ -451,6 +515,8 @@ def _apply_dense_clone_trail(
     masks: Sequence[NDArray[np.float32]],
     overlap: str,
     progress: ProgressCallback | None,
+    blend_tracks: Sequence[EffectTrack] = (),
+    effect_progress: Sequence[float] = (),
 ) -> NDArray[np.float32]:
     """Fill motion with overlapping photographic copies at pixel-spaced positions."""
 
@@ -459,7 +525,13 @@ def _apply_dense_clone_trail(
     newest_on_top = overlap == "newest"
 
     if not newest_on_top:
-        result = _blend_pose(result, frames[-1], masks[-1])
+        result = _blend_pose(
+            result,
+            frames[-1],
+            masks[-1],
+            blend_tracks,
+            effect_progress[-1] if effect_progress else 1.0,
+        )
 
     pair_indices = range(len(frames) - 1)
     if not newest_on_top:
@@ -500,13 +572,36 @@ def _apply_dense_clone_trail(
                         remaining = 1.0 - position
                         alpha = _translate(second_alpha, -dx * remaining, -dy * remaining)
                         source = _translate(second_source, -dx * remaining, -dy * remaining)
-                    target[:] = source + target * (1.0 - alpha[..., None])
+                    if blend_tracks:
+                        source_rgb = source / np.maximum(alpha[..., None], 0.001)
+                        pair_progress = (
+                            effect_progress[index]
+                            + position * (effect_progress[index + 1] - effect_progress[index])
+                            if effect_progress
+                            else (index + position) / max(1, len(frames) - 1)
+                        )
+                        target[:] = _blend_region(
+                            target,
+                            source_rgb,
+                            alpha,
+                            blend_tracks,
+                            pair_progress,
+                            origin=(left, top),
+                        )
+                    else:
+                        target[:] = source + target * (1.0 - alpha[..., None])
 
         value = 60 + int((completed / pair_total) * 20)
         _notify(progress, value, f"Cloning silhouette {completed} of {pair_total}")
 
     if newest_on_top:
-        result = _blend_pose(result, frames[-1], masks[-1])
+        result = _blend_pose(
+            result,
+            frames[-1],
+            masks[-1],
+            blend_tracks,
+            effect_progress[-1] if effect_progress else 1.0,
+        )
     return result
 
 
@@ -568,6 +663,8 @@ def compose_sequence(
         order.reverse()
     smear_enabled = settings.smear_style != "none"
     active_effects = tuple(track for track in settings.effect_tracks if track.enabled)
+    pixel_effects = tuple(track for track in active_effects if track.kind != "blend_mode")
+    blend_effects = tuple(track for track in active_effects if track.kind == "blend_mode")
     if cache is None and not smear_enabled and not return_masks and not active_effects:
         result = background.astype(np.float32)
         for position, index in enumerate(order):
@@ -604,7 +701,7 @@ def compose_sequence(
     returned_masks = masks
     effected_frames: list[ImageArray] = []
     effected_masks: list[NDArray[np.float32]] = []
-    if active_effects:
+    if pixel_effects:
         effect_total = len(source_frames)
         for index, (frame, mask, position) in enumerate(
             zip(source_frames, masks, progress_positions, strict=True)
@@ -613,7 +710,7 @@ def compose_sequence(
                 frame,
                 mask,
                 position,
-                active_effects,
+                pixel_effects,
                 pixel_scale=effect_pixel_scale,
             )
             effected_frames.append(effected_frame)
@@ -632,6 +729,8 @@ def compose_sequence(
                 effected_masks,
                 settings.overlap,
                 progress,
+                blend_effects,
+                progress_positions,
             )
         else:
             _notify(progress, 60, "Building silhouette ribbon")
@@ -640,6 +739,8 @@ def compose_sequence(
                 effected_frames,
                 effected_masks,
                 progress,
+                blend_effects,
+                progress_positions,
             )
     else:
         result = background.astype(np.float32)
@@ -649,7 +750,13 @@ def compose_sequence(
         endpoints = {0, len(source_frames) - 1}
         pose_order = [index for index in order if index in endpoints]
     for position, index in enumerate(pose_order):
-        result = _blend_pose(result, effected_frames[index], effected_masks[index])
+        result = _blend_pose(
+            result,
+            effected_frames[index],
+            effected_masks[index],
+            blend_effects,
+            progress_positions[index],
+        )
         value = 82 + int(((position + 1) / len(pose_order)) * 16)
         message = "Compositing sharp endpoints" if smear_enabled else "Compositing sharp poses"
         _notify(progress, value, message)

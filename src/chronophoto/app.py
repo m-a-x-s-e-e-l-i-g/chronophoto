@@ -230,6 +230,13 @@ QComboBox#effectPreset {
     padding: 0 7px;
     font-size: 10px;
 }
+QComboBox#effectMode {
+    min-height: 26px;
+    min-width: 136px;
+    max-width: 184px;
+    padding: 0 7px;
+    font-size: 10px;
+}
 QSpinBox#effectAmount {
     min-height: 25px;
     max-width: 74px;
