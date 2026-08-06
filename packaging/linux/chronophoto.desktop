@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Chronophoto
+Comment=Turn motion footage into layered action photographs
+Exec=Chronophoto
+Icon=chronophoto
+Terminal=false
+Categories=Graphics;Photography;
+Keywords=photo;video;motion;composite;
