@@ -8,7 +8,12 @@ import cv2
 import numpy as np
 from numpy.typing import NDArray
 
-from chronophoto.processing.effects import EffectTrack, apply_effect_tracks, blend_mode_rgb
+from chronophoto.processing.effects import (
+    EffectTrack,
+    apply_background_effect_tracks,
+    apply_effect_tracks,
+    blend_mode_rgb,
+)
 
 ImageArray = NDArray[np.uint8]
 ProgressCallback = Callable[[int, str], None]
@@ -35,7 +40,10 @@ class ComposeSettings:
     smear_style: str = "none"
     background: str = "automatic"
     min_component_ratio: float = 0.00035
+    # Kept as an input alias for projects created before trail/background scopes existed.
     effect_tracks: tuple[EffectTrack, ...] = ()
+    trail_effect_tracks: tuple[EffectTrack, ...] = ()
+    background_effect_tracks: tuple[EffectTrack, ...] = ()
 
     def __post_init__(self) -> None:
         if not 1 <= self.threshold <= 255:
@@ -54,8 +62,16 @@ class ComposeSettings:
             raise ValueError("unsupported smear style")
         if self.background not in {"automatic", "median", "first", "last"}:
             raise ValueError("unsupported background mode")
-        if any(not isinstance(track, EffectTrack) for track in self.effect_tracks):
-            raise ValueError("effect_tracks must contain EffectTrack values")
+        if self.effect_tracks and self.trail_effect_tracks:
+            raise ValueError("use effect_tracks or trail_effect_tracks, not both")
+        if self.effect_tracks:
+            self.trail_effect_tracks = self.effect_tracks
+        for name, tracks in (
+            ("trail_effect_tracks", self.trail_effect_tracks),
+            ("background_effect_tracks", self.background_effect_tracks),
+        ):
+            if any(not isinstance(track, EffectTrack) for track in tracks):
+                raise ValueError(f"{name} must contain EffectTrack values")
 
 
 @dataclass(slots=True)
@@ -517,6 +533,7 @@ def _apply_dense_clone_trail(
     progress: ProgressCallback | None,
     blend_tracks: Sequence[EffectTrack] = (),
     effect_progress: Sequence[float] = (),
+    analysis_background: ImageArray | None = None,
 ) -> NDArray[np.float32]:
     """Fill motion with overlapping photographic copies at pixel-spaced positions."""
 
@@ -555,9 +572,10 @@ def _apply_dense_clone_trail(
                 if not newest_on_top:
                     steps = range(step_count - 1, -1, -1)
 
-                clean_plate = background[top:bottom, left:right].astype(np.float32)
-                first_detail = np.max(np.abs(first_frame - clean_plate), axis=2)
-                second_detail = np.max(np.abs(second_frame - clean_plate), axis=2)
+                clean_plate = background if analysis_background is None else analysis_background
+                pair_plate = clean_plate[top:bottom, left:right].astype(np.float32)
+                first_detail = np.max(np.abs(first_frame - pair_plate), axis=2)
+                second_detail = np.max(np.abs(second_frame - pair_plate), axis=2)
                 first_alpha = first_mask * np.clip(first_detail / 12.0, 0.0, 1.0)
                 second_alpha = second_mask * np.clip(second_detail / 12.0, 0.0, 1.0)
                 first_source = first_frame * first_alpha[..., None]
@@ -662,10 +680,19 @@ def compose_sequence(
     if settings.overlap == "oldest":
         order.reverse()
     smear_enabled = settings.smear_style != "none"
-    active_effects = tuple(track for track in settings.effect_tracks if track.enabled)
-    pixel_effects = tuple(track for track in active_effects if track.kind != "blend_mode")
-    blend_effects = tuple(track for track in active_effects if track.kind == "blend_mode")
-    if cache is None and not smear_enabled and not return_masks and not active_effects:
+    active_trail_effects = tuple(track for track in settings.trail_effect_tracks if track.enabled)
+    active_background_effects = tuple(
+        track for track in settings.background_effect_tracks if track.enabled
+    )
+    pixel_effects = tuple(track for track in active_trail_effects if track.kind != "blend_mode")
+    blend_effects = tuple(track for track in active_trail_effects if track.kind == "blend_mode")
+    if (
+        cache is None
+        and not smear_enabled
+        and not return_masks
+        and not active_trail_effects
+        and not active_background_effects
+    ):
         result = background.astype(np.float32)
         for position, index in enumerate(order):
             value = 12 + int((position / len(order)) * 84)
@@ -698,6 +725,11 @@ def compose_sequence(
     if smear_enabled:
         _notify(progress, 59, "Tracking the primary moving subject")
         masks = _isolate_primary_motion(masks)
+    render_background = apply_background_effect_tracks(
+        background,
+        active_background_effects,
+        pixel_scale=effect_pixel_scale,
+    )
     returned_masks = masks
     effected_frames: list[ImageArray] = []
     effected_masks: list[NDArray[np.float32]] = []
@@ -724,18 +756,19 @@ def compose_sequence(
         if settings.smear_style == "dense_clones":
             _notify(progress, 60, "Filling motion with pixel-spaced clones")
             result = _apply_dense_clone_trail(
-                background,
+                render_background,
                 effected_frames,
                 effected_masks,
                 settings.overlap,
                 progress,
                 blend_effects,
                 progress_positions,
+                background,
             )
         else:
             _notify(progress, 60, "Building silhouette ribbon")
             result = _apply_motion_ribbon(
-                background,
+                render_background,
                 effected_frames,
                 effected_masks,
                 progress,
@@ -743,7 +776,7 @@ def compose_sequence(
                 progress_positions,
             )
     else:
-        result = background.astype(np.float32)
+        result = render_background.astype(np.float32)
 
     pose_order = order
     if smear_enabled:

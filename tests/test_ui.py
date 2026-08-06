@@ -185,7 +185,7 @@ def test_trail_style_is_disabled_and_smear_defaults_to_none() -> None:
     window.close()
 
 
-def test_effect_timeline_adds_independent_neutral_tracks() -> None:
+def test_trail_effect_timeline_adds_independent_neutral_tracks() -> None:
     _app = QApplication.instance() or QApplication([])
     window = ChronophotoWindow()
 
@@ -193,6 +193,7 @@ def test_effect_timeline_adds_independent_neutral_tracks() -> None:
     assert window.effect_timeline.isHidden()
     window.source = SourceState("video", [])
     window._set_loaded_state(True)
+    assert window.effect_timeline.title_label.text() == "TRAIL EFFECTS"
     for kind in (
         "opacity",
         "blend_mode",
@@ -217,7 +218,61 @@ def test_effect_timeline_adds_independent_neutral_tracks() -> None:
         "halftone",
     ]
     assert [track.value_at(0.5) for track in tracks] == [100, 100, 100, 0, 100, 0, 0, 0]
-    assert window._settings_snapshot().effect_tracks == tracks
+    assert window._settings_snapshot().trail_effect_tracks == tracks
+    window.close()
+
+
+def test_background_effects_use_constant_values_and_a_separate_scope() -> None:
+    _app = QApplication.instance() or QApplication([])
+    window = ChronophotoWindow()
+    panel = window.background_effect_timeline
+
+    assert panel.title_label.text() == "BACKGROUND EFFECTS"
+    assert panel.summary.text() == "NO EFFECTS · CLEAN PLATE"
+    assert not panel.is_expanded
+    lane = panel.add_effect("blur")
+
+    assert panel.is_expanded
+    assert not window.trail_effect_timeline.is_expanded
+    assert lane.graph.isHidden()
+    assert lane.preset.isHidden()
+    assert lane.position_spin.isHidden()
+    assert lane.value_spin.isVisibleTo(lane)
+    lane.value_spin.setValue(64)
+    lane._constant_value_committed()
+
+    track = lane.track
+    assert [point.value for point in track.keyframes] == [64, 64]
+    assert window._settings_snapshot().background_effect_tracks == (track,)
+    window.close()
+
+
+def test_background_effects_offer_the_same_effect_types_as_trail_effects() -> None:
+    _app = QApplication.instance() or QApplication([])
+    window = ChronophotoWindow()
+    with QSignalBlocker(window.background_effect_timeline):
+        for kind in (
+            "opacity",
+            "blend_mode",
+            "saturation",
+            "blur",
+            "jpeg_quality",
+            "stippling",
+            "dithering",
+            "halftone",
+        ):
+            window.background_effect_timeline.add_effect(kind)
+
+    assert [track.kind for track in window.background_effect_timeline.tracks()] == [
+        "opacity",
+        "blend_mode",
+        "saturation",
+        "blur",
+        "jpeg_quality",
+        "stippling",
+        "dithering",
+        "halftone",
+    ]
     window.close()
 
 
@@ -590,6 +645,21 @@ def test_range_render_reuses_the_file_level_video_cache(monkeypatch) -> None:
     with QSignalBlocker(window.effect_timeline):
         lane = window.effect_timeline.add_effect("opacity")
         lane.preset.setCurrentIndex(lane.preset.findData("rise_fall"))
+    window.render_preview()
+    deadline = monotonic() + 5
+    while window._thread is not None and monotonic() < deadline:
+        app.processEvents()
+        sleep(0.01)
+
+    assert window._thread is None
+    assert decoder_calls == []
+    assert analysis_builds == []
+    assert "cached frames and masks" in window.status_detail.text()
+
+    with QSignalBlocker(window.background_effect_timeline):
+        background_lane = window.background_effect_timeline.add_effect("saturation")
+        background_lane.value_spin.setValue(0)
+        background_lane._constant_value_committed()
     window.render_preview()
     deadline = monotonic() + 5
     while window._thread is not None and monotonic() < deadline:

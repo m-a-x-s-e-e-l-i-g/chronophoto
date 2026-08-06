@@ -529,10 +529,27 @@ class ChronophotoWindow(QMainWindow):
         timeline_layout.addWidget(self.range_slider)
         layout.addWidget(self.timeline_panel)
 
-        self.effect_timeline = EffectTimelinePanel()
-        self.effect_timeline.tracks_changing.connect(self._effect_tracks_changing)
-        self.effect_timeline.tracks_committed.connect(self._effect_tracks_committed)
-        layout.addWidget(self.effect_timeline)
+        self.trail_effect_timeline = EffectTimelinePanel(
+            "TRAIL EFFECTS",
+            "MASKED POSES",
+            empty_text="Add a keyframed effect to shape the subject and generated trail.",
+        )
+        # Compatibility alias for integrations written before effect scopes were split.
+        self.effect_timeline = self.trail_effect_timeline
+        self.background_effect_timeline = EffectTimelinePanel(
+            "BACKGROUND EFFECTS",
+            "CLEAN PLATE",
+            keyframed=False,
+            empty_text="Add a constant effect to process the clean plate behind the poses.",
+        )
+        self.background_effect_timeline.set_expanded(False)
+        for panel in (self.trail_effect_timeline, self.background_effect_timeline):
+            panel.tracks_changing.connect(self._effect_tracks_changing)
+            panel.tracks_committed.connect(self._effect_tracks_committed)
+        self.trail_effect_timeline.expanded_changed.connect(self._trail_effects_expanded)
+        self.background_effect_timeline.expanded_changed.connect(self._background_effects_expanded)
+        layout.addWidget(self.trail_effect_timeline)
+        layout.addWidget(self.background_effect_timeline)
 
         actions = QHBoxLayout()
         actions.setSpacing(9)
@@ -895,11 +912,13 @@ class ChronophotoWindow(QMainWindow):
     def _accept_paths(self, raw_paths: list[str]) -> None:
         if self._thread:
             return
-        if self.source and self.effect_timeline.tracks():
+        if self.source and (
+            self.trail_effect_timeline.tracks() or self.background_effect_timeline.tracks()
+        ):
             answer = QMessageBox.question(
                 self,
                 "Replace footage?",
-                "Replacing the source will clear the current effect timeline.",
+                "Replacing the source will clear the trail and background effects.",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
@@ -908,7 +927,10 @@ class ChronophotoWindow(QMainWindow):
         try:
             self._loading_source = True
             kind, paths = classify_paths(raw_paths)
-            self.effect_timeline.clear()
+            self.trail_effect_timeline.clear()
+            self.background_effect_timeline.clear()
+            self.trail_effect_timeline.set_expanded(True)
+            self.background_effect_timeline.set_expanded(False)
             self._clear_preview_state()
             if kind == "video":
                 info = probe_video(paths[0])
@@ -1159,7 +1181,8 @@ class ChronophotoWindow(QMainWindow):
             trail_style=str(self.trail_style.currentData()),
             smear_style=str(self.smear_style.currentData()),
             background=str(self.background_mode.currentData()),
-            effect_tracks=self.effect_timeline.tracks(),
+            trail_effect_tracks=self.trail_effect_timeline.tracks(),
+            background_effect_tracks=self.background_effect_timeline.tracks(),
         )
 
     def _video_range(self) -> tuple[float, float]:
@@ -1684,8 +1707,10 @@ class ChronophotoWindow(QMainWindow):
         self.source_summary.setVisible(loaded)
         self.frames_section.setVisible(loaded)
         self.timeline_panel.setVisible(loaded and bool(self.source and self.source.kind == "video"))
-        self.effect_timeline.setVisible(loaded)
-        self.effect_timeline.add_button.setEnabled(loaded)
+        self.trail_effect_timeline.setVisible(loaded)
+        self.background_effect_timeline.setVisible(loaded)
+        self.trail_effect_timeline.add_button.setEnabled(loaded)
+        self.background_effect_timeline.add_button.setEnabled(loaded)
         self.pose_navigation.setVisible(loaded)
         self.export_button.setEnabled(loaded)
         self.reset_button.setEnabled(loaded)
@@ -1719,7 +1744,7 @@ class ChronophotoWindow(QMainWindow):
     def _effect_tracks_changing(self) -> None:
         if self._loading_source or not self.source:
             return
-        self._mark_preview_dirty("Effect keyframes changed · preview is catching up")
+        self._mark_preview_dirty("Effect settings changed · preview is catching up")
         if self._thread:
             self._pending_preview = True
             return
@@ -1733,13 +1758,25 @@ class ChronophotoWindow(QMainWindow):
         self._update_compact_workspace()
         self.effect_preview_throttle.stop()
         self.preview_debounce.stop()
-        self._mark_preview_dirty("Applying the latest effect keyframes")
+        self._mark_preview_dirty("Applying the latest effect settings")
         if self._thread:
             self._pending_preview = True
             if self._worker:
                 self._worker.request_cancel()
             return
         self.render_preview()
+
+    @Slot(bool)
+    def _trail_effects_expanded(self, expanded: bool) -> None:
+        if expanded:
+            self.background_effect_timeline.set_expanded(False)
+        self._update_compact_workspace()
+
+    @Slot(bool)
+    def _background_effects_expanded(self, expanded: bool) -> None:
+        if expanded:
+            self.trail_effect_timeline.set_expanded(False)
+        self._update_compact_workspace()
 
     def _mark_preview_dirty(self, detail: str) -> None:
         self._preview_dirty = True
@@ -1813,7 +1850,10 @@ class ChronophotoWindow(QMainWindow):
         self.overlap_mode.setCurrentIndex(self.overlap_mode.findData("newest"))
         self.trail_style.setCurrentIndex(self.trail_style.findData("solid"))
         self.smear_style.setCurrentIndex(self.smear_style.findData("none"))
-        self.effect_timeline.clear()
+        self.trail_effect_timeline.clear()
+        self.background_effect_timeline.clear()
+        self.trail_effect_timeline.set_expanded(True)
+        self.background_effect_timeline.set_expanded(False)
         if self.source and self.source.kind == "video":
             self.range_slider.set_values(80, 850)
             self.alignment_mode.setCurrentIndex(self.alignment_mode.findData("off"))
@@ -1957,10 +1997,14 @@ class ChronophotoWindow(QMainWindow):
     def _update_compact_workspace(self) -> None:
         if not hasattr(self, "effect_timeline"):
             return
-        compact = self.height() < 760 and bool(self.effect_timeline.tracks())
+        has_effects = bool(
+            self.trail_effect_timeline.tracks() or self.background_effect_timeline.tracks()
+        )
+        compact = self.height() < 760 and has_effects
         self.preview_canvas.setMinimumSize(400, 180 if compact else 260)
         self.range_slider.set_compact(compact)
-        self.effect_timeline.set_compact(compact)
+        self.trail_effect_timeline.set_compact(compact)
+        self.background_effect_timeline.set_compact(compact)
         self.workspace_header.setVisible(not compact)
         self.pose_navigation.setVisible(not compact and self.source is not None)
         self.workspace_layout.setContentsMargins(

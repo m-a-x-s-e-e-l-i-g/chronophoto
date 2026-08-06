@@ -9,6 +9,7 @@ from chronophoto.processing.effects import (
     EFFECT_KINDS,
     EffectKeyframe,
     EffectTrack,
+    apply_background_effect_tracks,
     apply_effect_tracks,
     blend_mode_rgb,
     effect_preset,
@@ -126,6 +127,36 @@ def test_component_blend_modes_preserve_the_expected_luminosity() -> None:
 
     luminosity_result = blend_mode_rgb(backdrop, source, "luminosity")
     assert luminosity(luminosity_result[0, 0]) == pytest.approx(source_luminosity, abs=0.02)
+
+
+def test_background_effects_process_a_duplicate_of_the_clean_plate() -> None:
+    y, x = np.mgrid[:64, :96]
+    background = np.empty((64, 96, 3), dtype=np.uint8)
+    background[..., 0] = 30 + x * 2
+    background[..., 1] = 40 + y * 3
+    background[..., 2] = 180
+    full = (EffectKeyframe(0.0, 100.0), EffectKeyframe(1.0, 100.0))
+    zero = (EffectKeyframe(0.0, 0.0), EffectKeyframe(1.0, 0.0))
+
+    blurred = apply_background_effect_tracks(
+        background,
+        (EffectTrack("blur", full, amount=8),),
+    )
+    multiplied = apply_background_effect_tracks(
+        background,
+        (EffectTrack("blend_mode", full, option="multiply"),),
+    )
+    hidden_blur = apply_background_effect_tracks(
+        background,
+        (
+            EffectTrack("blur", full, amount=8),
+            EffectTrack("opacity", zero),
+        ),
+    )
+
+    assert not np.array_equal(blurred, background)
+    assert np.mean(multiplied) < np.mean(background)
+    assert np.array_equal(hidden_blur, background)
 
 
 def test_opacity_only_changes_the_subject_alpha() -> None:

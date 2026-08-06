@@ -78,16 +78,24 @@ your own footage first.
 - Connect poses with **Photographic stretch** or **Dense cloned copies**, or
   leave smear appearance set to **None** for distinct poses.
 - Pinch or two-finger scroll to zoom around the pointer, then drag to pan.
-- Stack keyframed opacity, Photoshop-style blend modes, saturation, blur, JPEG,
-  stippling, dithering, and halftone effects across the subject's motion.
+- Apply opacity, Photoshop-style blend modes, saturation, blur, JPEG,
+  stippling, dithering, and halftone independently to the trail or background.
 - Export full-resolution PNG, TIFF, or JPEG files.
 - See whether the installed version is current or a new GitHub release exists.
 
-## Shape effects across the trail
+## Shape the trail and background independently
 
-Open the **Effects** timeline beneath the source range and add any combination
-of subject effects. Each effect has its own independent lane and stays clipped
-to the detected person—the background and clean plate remain unchanged.
+The workspace separates effects into two clear scopes:
+
+- **Trail effects** follow the detected subject, sharp poses, photographic
+  stretch, and dense cloned copies. Every lane has its own motion keyframes.
+- **Background effects** process only the clean plate behind the poses. Because
+  the clean plate is a single layer rather than a sequence, these lanes use one
+  constant value instead of pretend timeline keyframes.
+
+The two editors work like an accordion, keeping one expanded at a time so the
+photograph remains the largest part of the workspace. Their stacks are fully
+independent and changing either scope reuses the existing frame and mask cache.
 
 Start with `0 → 100 → 0`, `0 → 100`, or `100 → 0`, then drag the keyframes or
 enter exact position and value percentages. Effect positions use normalized
@@ -106,13 +114,15 @@ disabled frames, and overlap order.
   and pattern-size controls.
 
 Drag lanes to change processing order, or bypass one temporarily without losing
-its keyframes. Dense clones and photographic stretch inherit the same effects
-between their original source frames.
+its settings. Background opacity fades a processed layer back toward the
+untouched clean plate; background blend modes behave like a duplicate clean
+plate layer blended over its original.
 
-![Chronophoto with independent opacity, blur, and halftone effect lanes](docs/images/chronophoto-effect-timeline.png)
+![Chronophoto with separate trail and background effect editors](docs/images/chronophoto-effect-timeline.png)
 
-*Effect lanes stay aligned with the selected source range while the photograph
-remains the main workspace.*
+*Trail lanes stay aligned with motion progress; background lanes use one exact
+value. The editors collapse independently so the photograph remains the main
+workspace.*
 
 ## Real-footage examples
 

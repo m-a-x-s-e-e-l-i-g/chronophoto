@@ -301,6 +301,39 @@ def test_zero_blend_strength_is_identical_to_normal_compositing() -> None:
     assert np.array_equal(blended, normal)
 
 
+def test_background_effects_leave_masked_poses_unfiltered() -> None:
+    background = np.full((48, 80, 3), (40, 120, 210), dtype=np.uint8)
+    frames = [background.copy(), background.copy()]
+    frames[0][12:32, 10:26] = (220, 60, 30)
+    frames[1][12:32, 48:64] = (30, 210, 70)
+    masks = [np.zeros((48, 80), dtype=np.uint8) for _ in frames]
+    masks[0][12:32, 10:26] = 255
+    masks[1][12:32, 48:64] = 255
+    zero = (EffectKeyframe(0.0, 0.0), EffectKeyframe(1.0, 0.0))
+
+    result, returned_masks = compose_sequence(
+        frames,
+        ComposeSettings(
+            background_effect_tracks=(EffectTrack("saturation", zero),),
+        ),
+        cache=ComposeCache(background, masks),
+    )
+
+    assert result[2, 2, 0] == result[2, 2, 1] == result[2, 2, 2]
+    assert np.array_equal(result[20, 18], (220, 60, 30))
+    assert np.array_equal(result[20, 56], (30, 210, 70))
+    assert returned_masks[0][20, 18] == 1.0
+
+
+def test_legacy_effect_tracks_remain_a_trail_effect_alias() -> None:
+    track = neutral_effect_track("opacity")
+    settings = ComposeSettings(effect_tracks=(track,))
+
+    assert settings.trail_effect_tracks == (track,)
+    with pytest.raises(ValueError, match="not both"):
+        ComposeSettings(effect_tracks=(track,), trail_effect_tracks=(track,))
+
+
 @pytest.mark.parametrize("smear_style", ["photographic", "dense_clones"])
 def test_effects_apply_to_generated_smear_pixels(smear_style: str) -> None:
     frames = moving_subject_frames(4)

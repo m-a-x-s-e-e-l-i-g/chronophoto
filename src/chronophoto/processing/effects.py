@@ -505,3 +505,46 @@ def apply_effect_tracks(
     result[top:bottom, left:right] = np.clip(rgb, 0, 255).astype(np.uint8)
     effected_mask[top:bottom, left:right] = np.clip(alpha, 0.0, 1.0)
     return result, effected_mask
+
+
+def apply_background_effect_tracks(
+    background: ImageArray,
+    tracks: tuple[EffectTrack, ...],
+    *,
+    pixel_scale: float = 1.0,
+) -> ImageArray:
+    """Process a clean plate as a full-frame layer over its untouched original."""
+
+    active = tuple(track for track in tracks if track.enabled)
+    if not active:
+        return background
+    full_mask = np.ones(background.shape[:2], dtype=np.float32)
+    pixel_tracks = tuple(track for track in active if track.kind != "blend_mode")
+    processed, alpha = apply_effect_tracks(
+        background,
+        full_mask,
+        0.5,
+        pixel_tracks,
+        pixel_scale=pixel_scale,
+    )
+    backdrop = background.astype(np.float32)
+    source = processed.astype(np.float32)
+    alpha_3d = alpha[..., None]
+    composite = source * alpha_3d + backdrop * (1.0 - alpha_3d)
+    for track in active:
+        if track.kind != "blend_mode":
+            continue
+        strength = track.value_at(0.5) / 100.0
+        if strength <= 0.00001 or track.option == "normal":
+            continue
+        if track.option == "dissolve":
+            height, width = alpha.shape
+            y, x = np.indices((height, width), dtype=np.uint32)
+            noise = ((x * 1597334677) ^ (y * 3812015801)) & 0xFFFF
+            visible = noise.astype(np.float32) / 65535.0 < alpha
+            mode_composite = np.where(visible[..., None], source, backdrop)
+        else:
+            mode_source = blend_mode_rgb(backdrop, source, track.option)
+            mode_composite = mode_source * alpha_3d + backdrop * (1.0 - alpha_3d)
+        composite = composite * (1.0 - strength) + mode_composite * strength
+    return np.clip(composite, 0.0, 255.0).astype(np.uint8)
