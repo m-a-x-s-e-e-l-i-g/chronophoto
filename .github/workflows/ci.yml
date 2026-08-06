@@ -25,6 +25,9 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
+      - name: Install Linux desktop runtime
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes libegl1 libxcb-cursor0 libxkbcommon-x11-0
       - name: Install project
         run: python -m pip install -e ".[dev]"
       - name: Check formatting

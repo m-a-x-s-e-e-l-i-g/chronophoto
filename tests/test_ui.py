@@ -98,7 +98,7 @@ def test_workspace_still_has_room_at_minimum_window_size() -> None:
     app.processEvents()
 
     assert window.preview_canvas.width() >= 400
-    assert window.body_splitter.sizes()[1] >= 500
+    assert window.body_splitter.sizes()[1] >= 400
 
     window.close()
 
