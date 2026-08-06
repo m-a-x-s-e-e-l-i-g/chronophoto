@@ -11,6 +11,12 @@
   Video-first. Local processing. Windows, macOS, and Linux.
 </p>
 
+<p align="center">
+  <a href="https://github.com/m-a-x-s-e-e-l-i-g/chronophoto/releases/latest">
+    <img src="https://img.shields.io/badge/DOWNLOAD-LATEST_RELEASE-000000?style=for-the-badge&logo=github&logoColor=white&labelColor=000000" alt="Download the latest Chronophoto release">
+  </a>
+</p>
+
 ![A finished Chronophoto motion composite showing every stage of a jump](docs/images/chronophoto-result.png)
 
 ## One movement. One photograph.
