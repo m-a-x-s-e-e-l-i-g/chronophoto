@@ -9,13 +9,15 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
-from PySide6.QtCore import QMimeData, QPoint, QPointF, Qt, QUrl  # noqa: E402
+from PySide6.QtCore import QMimeData, QPoint, QPointF, QSignalBlocker, Qt, QUrl  # noqa: E402
 from PySide6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QImage, QWheelEvent  # noqa: E402
 from PySide6.QtWidgets import QApplication, QSlider  # noqa: E402
 
 from chronophoto import __version__  # noqa: E402
 from chronophoto.app import application_stylesheet, main  # noqa: E402
+from chronophoto.processing import EffectKeyframe  # noqa: E402
 from chronophoto.processing.sources import MediaSequence, VideoInfo  # noqa: E402
+from chronophoto.ui.effects import EffectKeyframeGraph  # noqa: E402
 from chronophoto.ui.widgets import (  # noqa: E402
     PreviewCanvas,
     ScrollSafeComboBox,
@@ -180,6 +182,163 @@ def test_trail_style_is_disabled_and_smear_defaults_to_none() -> None:
     assert window._settings_snapshot().smear_style == "none"
     window.smear_style.setCurrentIndex(window.smear_style.findData("dense_clones"))
     assert window._settings_snapshot().smear_style == "dense_clones"
+    window.close()
+
+
+def test_effect_timeline_adds_independent_neutral_tracks() -> None:
+    _app = QApplication.instance() or QApplication([])
+    window = ChronophotoWindow()
+
+    assert window.effect_timeline.tracks() == ()
+    assert window.effect_timeline.isHidden()
+    window.source = SourceState("video", [])
+    window._set_loaded_state(True)
+    for kind in (
+        "opacity",
+        "saturation",
+        "blur",
+        "jpeg_quality",
+        "stippling",
+        "dithering",
+        "halftone",
+    ):
+        window.effect_timeline.add_effect(kind)
+
+    tracks = window.effect_timeline.tracks()
+    assert [track.kind for track in tracks] == [
+        "opacity",
+        "saturation",
+        "blur",
+        "jpeg_quality",
+        "stippling",
+        "dithering",
+        "halftone",
+    ]
+    assert [track.value_at(0.5) for track in tracks] == [100, 100, 0, 100, 0, 0, 0]
+    assert window._settings_snapshot().effect_tracks == tracks
+    window.close()
+
+
+def test_effect_lane_presets_and_bypass_preserve_keyframes() -> None:
+    _app = QApplication.instance() or QApplication([])
+    window = ChronophotoWindow()
+    lane = window.effect_timeline.add_effect("opacity")
+    lane.preset.setCurrentIndex(lane.preset.findData("rise_fall"))
+
+    assert [point.value for point in lane.track.keyframes] == [0, 100, 0]
+    lane.enabled_box.setChecked(False)
+    assert not lane.track.enabled
+    assert [point.value for point in lane.track.keyframes] == [0, 100, 0]
+    assert window.effect_timeline.summary.text().startswith("0 ACTIVE / 1 TRACKS")
+    lane.enabled_box.setChecked(True)
+    assert lane.track.enabled
+    window.close()
+
+
+def test_effect_keyframe_graph_emits_live_and_committed_updates() -> None:
+    _app = QApplication.instance() or QApplication([])
+    graph = EffectKeyframeGraph(
+        (
+            EffectKeyframe(0.0, 0.0),
+            EffectKeyframe(0.5, 100.0),
+            EffectKeyframe(1.0, 0.0),
+        )
+    )
+    graph.resize(600, 80)
+    graph._selected = 1
+    changing: list[tuple[EffectKeyframe, ...]] = []
+    committed: list[tuple[EffectKeyframe, ...]] = []
+    graph.keyframes_changing.connect(changing.append)
+    graph.keyframes_committed.connect(committed.append)
+
+    graph._set_selected_point(QPointF(350, 40), live=True)
+    graph._set_selected_point(QPointF(360, 35), live=False)
+
+    assert len(changing) == 1
+    assert len(committed) == 1
+    assert changing[0][1].progress != 0.5
+    assert committed[0][1].value > changing[0][1].value
+    graph.close()
+
+
+def test_effect_lane_supports_exact_numeric_keyframe_editing() -> None:
+    _app = QApplication.instance() or QApplication([])
+    window = ChronophotoWindow()
+    lane = window.effect_timeline.add_effect("blur")
+    lane.preset.setCurrentIndex(lane.preset.findData("rise_fall"))
+    lane.graph._selected = 1
+    lane.graph._emit_selection()
+
+    lane.position_spin.setValue(65)
+    lane.value_spin.setValue(72)
+    lane.graph.commit_selected()
+
+    assert lane.track.keyframes[1].progress == pytest.approx(0.65)
+    assert lane.track.keyframes[1].value == 72
+    assert lane.position_spin.isEnabled()
+    lane.graph._selected = 0
+    lane.graph._emit_selection()
+    assert not lane.position_spin.isEnabled()
+    window.close()
+
+
+def test_effect_lanes_can_be_reordered_by_drag_position() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = ChronophotoWindow()
+    first = window.effect_timeline.add_effect("blur")
+    second = window.effect_timeline.add_effect("halftone")
+    window.effect_timeline.resize(800, 240)
+    window.effect_timeline.show()
+    app.processEvents()
+
+    window.effect_timeline._drag_started(first)
+    target = window.effect_timeline.lane_container.mapToGlobal(
+        QPoint(20, second.geometry().bottom() + 5)
+    )
+    window.effect_timeline._drag_moved(first, target)
+    window.effect_timeline._drag_finished(first)
+
+    assert [track.kind for track in window.effect_timeline.tracks()] == ["halftone", "blur"]
+    window.close()
+
+
+def test_effect_progress_uses_source_timestamps() -> None:
+    progress = ChronophotoWindow._normalized_effect_progress(
+        [10.0, 10.5, 12.0, 14.0],
+        4,
+        10.0,
+        14.0,
+    )
+
+    assert progress == pytest.approx((0.0, 0.125, 0.5, 1.0))
+
+
+def test_effect_editor_has_a_usable_compact_window_state() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = ChronophotoWindow()
+    path = Path("clip.mp4")
+    window.source = SourceState("video", [path], VideoInfo(path, 10.0, 1920, 1080, 30.0, 300))
+    window._set_loaded_state(True)
+    with QSignalBlocker(window.effect_timeline):
+        lane = window.effect_timeline.add_effect("opacity")
+    window.resize(960, 680)
+    window.show()
+    app.processEvents()
+    window._update_compact_workspace()
+    app.processEvents()
+
+    assert window.workspace_header.isHidden()
+    assert window.pose_navigation.isHidden()
+    assert window.preview_mode_buttons["composite"].isVisible()
+    assert window.preview_canvas.height() >= 180
+    assert lane.graph.height() >= 50
+    assert window.export_button.isVisible()
+
+    window.resize(1380, 880)
+    app.processEvents()
+    window._update_compact_workspace()
+    assert not window.workspace_header.isHidden()
+    assert not window.pose_navigation.isHidden()
     window.close()
 
 
@@ -385,6 +544,20 @@ def test_range_render_reuses_the_file_level_video_cache(monkeypatch) -> None:
         sleep(0.01)
 
     assert window._thread is None
+    assert analysis_builds == []
+    assert "cached frames and masks" in window.status_detail.text()
+
+    with QSignalBlocker(window.effect_timeline):
+        lane = window.effect_timeline.add_effect("opacity")
+        lane.preset.setCurrentIndex(lane.preset.findData("rise_fall"))
+    window.render_preview()
+    deadline = monotonic() + 5
+    while window._thread is not None and monotonic() < deadline:
+        app.processEvents()
+        sleep(0.01)
+
+    assert window._thread is None
+    assert decoder_calls == []
     assert analysis_builds == []
     assert "cached frames and masks" in window.status_detail.text()
     window.close()

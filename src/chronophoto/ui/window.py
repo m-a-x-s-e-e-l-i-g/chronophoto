@@ -8,7 +8,7 @@ from pathlib import Path
 from threading import Event
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 from PySide6.QtCore import (
     QObject,
     QSettings,
@@ -57,6 +57,7 @@ from chronophoto.processing import (
     select_video_sequence,
 )
 from chronophoto.processing.sources import VideoInfo, probe_video
+from chronophoto.ui.effects import EffectTimelinePanel
 from chronophoto.ui.widgets import (
     DropSurface,
     PreviewCanvas,
@@ -101,6 +102,7 @@ class RenderRequest:
     video_cache_key: tuple[object, ...] | None
     video_duration: float
     enabled_video_indices: tuple[int, ...] | None
+    source_dimensions: tuple[int, int]
 
 
 @dataclass(slots=True)
@@ -182,6 +184,10 @@ class ChronophotoWindow(QMainWindow):
         self.preview_debounce.setSingleShot(True)
         self.preview_debounce.setInterval(450)
         self.preview_debounce.timeout.connect(self.render_preview)
+        self.effect_preview_throttle = QTimer(self)
+        self.effect_preview_throttle.setSingleShot(True)
+        self.effect_preview_throttle.setInterval(160)
+        self.effect_preview_throttle.timeout.connect(self.render_preview)
         self.playback_timer = QTimer(self)
         self.playback_timer.setInterval(180)
         self.playback_timer.timeout.connect(self._advance_pose)
@@ -437,10 +443,13 @@ class ChronophotoWindow(QMainWindow):
         workspace = QWidget()
         workspace.setObjectName("workspace")
         layout = QVBoxLayout(workspace)
+        self.workspace_layout = layout
         layout.setContentsMargins(18, 16, 18, 14)
         layout.setSpacing(12)
 
-        top = QHBoxLayout()
+        self.workspace_header = QWidget()
+        top = QHBoxLayout(self.workspace_header)
+        top.setContentsMargins(0, 0, 0, 0)
         top.setSpacing(10)
         self.preview_heading = QLabel("Untitled study")
         self.preview_heading.setObjectName("workspaceTitle")
@@ -449,7 +458,7 @@ class ChronophotoWindow(QMainWindow):
         top.addWidget(self.preview_heading)
         top.addStretch()
         top.addWidget(self.result_meta)
-        layout.addLayout(top)
+        layout.addWidget(self.workspace_header)
 
         mode_row = QHBoxLayout()
         mode_row.setSpacing(0)
@@ -519,6 +528,11 @@ class ChronophotoWindow(QMainWindow):
         timeline_layout.addLayout(time_header)
         timeline_layout.addWidget(self.range_slider)
         layout.addWidget(self.timeline_panel)
+
+        self.effect_timeline = EffectTimelinePanel()
+        self.effect_timeline.tracks_changing.connect(self._effect_tracks_changing)
+        self.effect_timeline.tracks_committed.connect(self._effect_tracks_committed)
+        layout.addWidget(self.effect_timeline)
 
         actions = QHBoxLayout()
         actions.setSpacing(9)
@@ -881,9 +895,20 @@ class ChronophotoWindow(QMainWindow):
     def _accept_paths(self, raw_paths: list[str]) -> None:
         if self._thread:
             return
+        if self.source and self.effect_timeline.tracks():
+            answer = QMessageBox.question(
+                self,
+                "Replace footage?",
+                "Replacing the source will clear the current effect timeline.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
         try:
             self._loading_source = True
             kind, paths = classify_paths(raw_paths)
+            self.effect_timeline.clear()
             self._clear_preview_state()
             if kind == "video":
                 info = probe_video(paths[0])
@@ -1134,6 +1159,7 @@ class ChronophotoWindow(QMainWindow):
             trail_style=str(self.trail_style.currentData()),
             smear_style=str(self.smear_style.currentData()),
             background=str(self.background_mode.currentData()),
+            effect_tracks=self.effect_timeline.tracks(),
         )
 
     def _video_range(self) -> tuple[float, float]:
@@ -1172,6 +1198,10 @@ class ChronophotoWindow(QMainWindow):
                 max_dimension,
             )
             video_duration = self.source.video_info.duration
+            source_dimensions = (
+                self.source.video_info.width,
+                self.source.video_info.height,
+            )
         else:
             start, end = 0.0, 0.0
             paths = self._ordered_photo_paths()
@@ -1182,6 +1212,8 @@ class ChronophotoWindow(QMainWindow):
             video_duration = 0.0
             if len(paths) < 2:
                 raise ValueError("Enable at least two photographs")
+            with Image.open(paths[0]) as image:
+                source_dimensions = ImageOps.exif_transpose(image).size
         cache_key = (
             self.source.kind,
             tuple(str(path) for path in paths),
@@ -1204,6 +1236,7 @@ class ChronophotoWindow(QMainWindow):
             video_cache_key=video_cache_key,
             video_duration=video_duration,
             enabled_video_indices=enabled_indices,
+            source_dimensions=source_dimensions,
         )
 
     @Slot()
@@ -1332,6 +1365,11 @@ class ChronophotoWindow(QMainWindow):
                 selected_source_indices = [source_indices[index] for index in selected_positions]
                 frames = [analysis_cache.frames[index] for index in selected_source_indices]
                 labels = [labels[index] for index in selected_positions]
+                selected_timestamps = (
+                    [sequence.timestamps[index] for index in selected_positions]
+                    if sequence.timestamps is not None
+                    else None
+                )
                 selected_cache = analysis_cache.compose_cache.select(selected_source_indices)
                 compose_start = 70 if analysis_was_built else 40
                 compose_span = 30 if analysis_was_built else 60
@@ -1342,6 +1380,16 @@ class ChronophotoWindow(QMainWindow):
                         compose_start + int(value * compose_span / 100), message
                     ),
                     cache=selected_cache,
+                    effect_progress=self._normalized_effect_progress(
+                        selected_timestamps,
+                        len(frames),
+                        request.start,
+                        request.end,
+                    ),
+                    effect_pixel_scale=self._effect_pixel_scale(
+                        frames,
+                        request.source_dimensions,
+                    ),
                 )
                 aligned = frames
             else:
@@ -1355,6 +1403,16 @@ class ChronophotoWindow(QMainWindow):
                     aligned,
                     request.settings,
                     progress=lambda value, message: progress(40 + int(value * 0.60), message),
+                    effect_progress=self._normalized_effect_progress(
+                        None,
+                        len(aligned),
+                        0.0,
+                        1.0,
+                    ),
+                    effect_pixel_scale=self._effect_pixel_scale(
+                        aligned,
+                        request.source_dimensions,
+                    ),
                 )
             return {
                 "result": result,
@@ -1471,10 +1529,12 @@ class ChronophotoWindow(QMainWindow):
                     progress=lambda value, message: progress(int(value * 0.30), message),
                 )
             frames = sequence.frames
+            timestamps = sequence.timestamps
             if request.kind == "video" and request.enabled_video_indices is not None:
-                frames = [
-                    frames[index] for index in request.enabled_video_indices if index < len(frames)
-                ]
+                enabled = [index for index in request.enabled_video_indices if index < len(frames)]
+                frames = [frames[index] for index in enabled]
+                if timestamps is not None:
+                    timestamps = [timestamps[index] for index in enabled]
             aligned = align_sequence(
                 frames,
                 request.alignment,
@@ -1485,6 +1545,13 @@ class ChronophotoWindow(QMainWindow):
                 request.settings,
                 progress=lambda value, message: progress(42 + int(value * 0.53), message),
                 return_masks=False,
+                effect_progress=self._normalized_effect_progress(
+                    timestamps,
+                    len(aligned),
+                    request.start,
+                    request.end,
+                ),
+                effect_pixel_scale=1.0,
             )
             progress(97, "Writing image")
             image = Image.fromarray(result)
@@ -1617,6 +1684,8 @@ class ChronophotoWindow(QMainWindow):
         self.source_summary.setVisible(loaded)
         self.frames_section.setVisible(loaded)
         self.timeline_panel.setVisible(loaded and bool(self.source and self.source.kind == "video"))
+        self.effect_timeline.setVisible(loaded)
+        self.effect_timeline.add_button.setEnabled(loaded)
         self.pose_navigation.setVisible(loaded)
         self.export_button.setEnabled(loaded)
         self.reset_button.setEnabled(loaded)
@@ -1645,6 +1714,32 @@ class ChronophotoWindow(QMainWindow):
             self._pending_preview = True
             return
         self.preview_debounce.start()
+
+    @Slot()
+    def _effect_tracks_changing(self) -> None:
+        if self._loading_source or not self.source:
+            return
+        self._mark_preview_dirty("Effect keyframes changed · preview is catching up")
+        if self._thread:
+            self._pending_preview = True
+            return
+        if not self.effect_preview_throttle.isActive():
+            self.effect_preview_throttle.start()
+
+    @Slot()
+    def _effect_tracks_committed(self) -> None:
+        if self._loading_source or not self.source:
+            return
+        self._update_compact_workspace()
+        self.effect_preview_throttle.stop()
+        self.preview_debounce.stop()
+        self._mark_preview_dirty("Applying the latest effect keyframes")
+        if self._thread:
+            self._pending_preview = True
+            if self._worker:
+                self._worker.request_cancel()
+            return
+        self.render_preview()
 
     def _mark_preview_dirty(self, detail: str) -> None:
         self._preview_dirty = True
@@ -1718,6 +1813,7 @@ class ChronophotoWindow(QMainWindow):
         self.overlap_mode.setCurrentIndex(self.overlap_mode.findData("newest"))
         self.trail_style.setCurrentIndex(self.trail_style.findData("solid"))
         self.smear_style.setCurrentIndex(self.smear_style.findData("none"))
+        self.effect_timeline.clear()
         if self.source and self.source.kind == "video":
             self.range_slider.set_values(80, 850)
             self.alignment_mode.setCurrentIndex(self.alignment_mode.findData("off"))
@@ -1725,6 +1821,33 @@ class ChronophotoWindow(QMainWindow):
             self.alignment_mode.setCurrentIndex(self.alignment_mode.findData("translation"))
         self._loading_source = False
         self._schedule_preview()
+
+    @staticmethod
+    def _normalized_effect_progress(
+        timestamps: list[float] | None,
+        count: int,
+        start: float,
+        end: float,
+    ) -> tuple[float, ...]:
+        if count <= 1:
+            return (0.0,) * count
+        if timestamps is None or len(timestamps) != count or end <= start:
+            return tuple(float(value) for value in np.linspace(0.0, 1.0, count))
+        duration = max(0.000001, end - start)
+        return tuple(max(0.0, min(1.0, (timestamp - start) / duration)) for timestamp in timestamps)
+
+    @staticmethod
+    def _effect_pixel_scale(
+        frames: list[np.ndarray],
+        source_dimensions: tuple[int, int],
+    ) -> float:
+        if not frames or source_dimensions[0] <= 0 or source_dimensions[1] <= 0:
+            return 1.0
+        return min(
+            1.0,
+            frames[0].shape[1] / source_dimensions[0],
+            frames[0].shape[0] / source_dimensions[1],
+        )
 
     def _set_preview_mode(self, mode: str) -> None:
         button = self.preview_mode_buttons.get(mode)
@@ -1828,4 +1951,22 @@ class ChronophotoWindow(QMainWindow):
     def resizeEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         if hasattr(self, "drop_overlay") and self.centralWidget():
             self.drop_overlay.setGeometry(self.centralWidget().rect())
+        self._update_compact_workspace()
         super().resizeEvent(event)
+
+    def _update_compact_workspace(self) -> None:
+        if not hasattr(self, "effect_timeline"):
+            return
+        compact = self.height() < 760 and bool(self.effect_timeline.tracks())
+        self.preview_canvas.setMinimumSize(400, 180 if compact else 260)
+        self.range_slider.set_compact(compact)
+        self.effect_timeline.set_compact(compact)
+        self.workspace_header.setVisible(not compact)
+        self.pose_navigation.setVisible(not compact and self.source is not None)
+        self.workspace_layout.setContentsMargins(
+            12 if compact else 18,
+            9 if compact else 16,
+            12 if compact else 18,
+            9 if compact else 14,
+        )
+        self.workspace_layout.setSpacing(7 if compact else 12)
