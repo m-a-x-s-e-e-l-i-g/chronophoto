@@ -215,12 +215,22 @@ shows exactly which pixels Chronophoto will keep.
 *Zoom is anchored beneath the pointer. Double-click the preview to return to a
 fitted view.*
 
-## Show what you made
+## Get creative. Show what you made.
 
-Created a motion study you like? Share the exported image in Chronophoto's
+Chronophoto does not have to stop at a clean, literal action sequence. Stack
+effects, reverse the overlap, stretch movement, export layers, and combine the
+results into something strange and personal.
+
+![Experimental Chronophoto artwork combining repeated movement, transparency, blur, and halftone texture](docs/images/community-experimental-motion-study.png)
+
+*Push the trail until the source movement becomes a texture, a rhythm, or an
+entirely new composition.*
+
+Made something surprising? Share it in Chronophoto's
 [Show and tell discussions](https://github.com/m-a-x-s-e-e-l-i-g/chronophoto/discussions/categories/show-and-tell).
-Add a few words about the movement, your source footage, or the settings that
-helped you get the result.
+Add a few words about the movement, source footage, effects, or happy accidents
+that helped you reach the result. Your experiment might become someone else's
+starting point.
 
 [Start a Show and tell post](https://github.com/m-a-x-s-e-e-l-i-g/chronophoto/discussions/new?category=show-and-tell)
 or browse the community's creations for inspiration.
