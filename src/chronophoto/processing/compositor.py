@@ -8,6 +8,8 @@ import cv2
 import numpy as np
 from numpy.typing import NDArray
 
+from chronophoto.processing.effects import EffectTrack, apply_effect_tracks
+
 ImageArray = NDArray[np.uint8]
 ProgressCallback = Callable[[int, str], None]
 CLEAN_PLATE_MAX_FRAMES = 21
@@ -33,6 +35,7 @@ class ComposeSettings:
     smear_style: str = "none"
     background: str = "automatic"
     min_component_ratio: float = 0.00035
+    effect_tracks: tuple[EffectTrack, ...] = ()
 
     def __post_init__(self) -> None:
         if not 1 <= self.threshold <= 255:
@@ -51,6 +54,8 @@ class ComposeSettings:
             raise ValueError("unsupported smear style")
         if self.background not in {"automatic", "median", "first", "last"}:
             raise ValueError("unsupported background mode")
+        if any(not isinstance(track, EffectTrack) for track in self.effect_tracks):
+            raise ValueError("effect_tracks must contain EffectTrack values")
 
 
 @dataclass(slots=True)
@@ -284,9 +289,15 @@ def _blend_pose(
     frame: ImageArray,
     mask: NDArray[np.float32],
 ) -> NDArray[np.float32]:
-    source = frame.astype(np.float32)
-    alpha = mask[..., None]
-    return source * alpha + result * (1.0 - alpha)
+    points = cv2.findNonZero((mask > 0.001).astype(np.uint8))
+    if points is None:
+        return result
+    x, y, width, height = cv2.boundingRect(points)
+    target = result[y : y + height, x : x + width]
+    source = frame[y : y + height, x : x + width].astype(np.float32)
+    alpha = mask[y : y + height, x : x + width, None]
+    target[:] = source * alpha + target * (1.0 - alpha)
+    return result
 
 
 def _mask_centroid(mask: NDArray[np.float32]) -> tuple[float, float] | None:
@@ -506,11 +517,31 @@ def compose_sequence(
     *,
     return_masks: bool = True,
     cache: ComposeCache | None = None,
+    effect_progress: Sequence[float] | None = None,
+    effect_pixel_scale: float = 1.0,
 ) -> tuple[ImageArray, list[NDArray[np.float32]]]:
     """Composite a chronological sequence and return the result plus pose masks."""
 
     settings = settings or ComposeSettings()
     source_frames = _validate_frames(frames)
+    if effect_progress is None:
+        progress_positions = np.linspace(0.0, 1.0, len(source_frames)).tolist()
+    else:
+        progress_positions = [float(position) for position in effect_progress]
+        if len(progress_positions) != len(source_frames):
+            raise ValueError("Effect progress must match the selected frames")
+        if any(
+            not math.isfinite(position) or not 0.0 <= position <= 1.0
+            for position in progress_positions
+        ):
+            raise ValueError("Effect progress values must be between 0 and 1")
+        if any(
+            left > right
+            for left, right in zip(progress_positions, progress_positions[1:], strict=False)
+        ):
+            raise ValueError("Effect progress values must be chronological")
+    if not math.isfinite(effect_pixel_scale) or effect_pixel_scale <= 0.0:
+        raise ValueError("effect_pixel_scale must be positive")
     if cache is not None:
         if cache.background.shape != source_frames[0].shape:
             raise ValueError("Cached clean plate does not match the selected frames")
@@ -536,7 +567,8 @@ def compose_sequence(
     if settings.overlap == "oldest":
         order.reverse()
     smear_enabled = settings.smear_style != "none"
-    if cache is None and not smear_enabled and not return_masks:
+    active_effects = tuple(track for track in settings.effect_tracks if track.enabled)
+    if cache is None and not smear_enabled and not return_masks and not active_effects:
         result = background.astype(np.float32)
         for position, index in enumerate(order):
             value = 12 + int((position / len(order)) * 84)
@@ -569,12 +601,35 @@ def compose_sequence(
     if smear_enabled:
         _notify(progress, 59, "Tracking the primary moving subject")
         masks = _isolate_primary_motion(masks)
+    returned_masks = masks
+    effected_frames: list[ImageArray] = []
+    effected_masks: list[NDArray[np.float32]] = []
+    if active_effects:
+        effect_total = len(source_frames)
+        for index, (frame, mask, position) in enumerate(
+            zip(source_frames, masks, progress_positions, strict=True)
+        ):
+            effected_frame, effected_mask = apply_effect_tracks(
+                frame,
+                mask,
+                position,
+                active_effects,
+                pixel_scale=effect_pixel_scale,
+            )
+            effected_frames.append(effected_frame)
+            effected_masks.append(effected_mask)
+            _notify(progress, 59, f"Applying effects to pose {index + 1} of {effect_total}")
+    else:
+        effected_frames = source_frames
+        effected_masks = masks
+
+    if smear_enabled:
         if settings.smear_style == "dense_clones":
             _notify(progress, 60, "Filling motion with pixel-spaced clones")
             result = _apply_dense_clone_trail(
                 background,
-                source_frames,
-                masks,
+                effected_frames,
+                effected_masks,
                 settings.overlap,
                 progress,
             )
@@ -582,8 +637,8 @@ def compose_sequence(
             _notify(progress, 60, "Building silhouette ribbon")
             result = _apply_motion_ribbon(
                 background,
-                source_frames,
-                masks,
+                effected_frames,
+                effected_masks,
                 progress,
             )
     else:
@@ -594,11 +649,11 @@ def compose_sequence(
         endpoints = {0, len(source_frames) - 1}
         pose_order = [index for index in order if index in endpoints]
     for position, index in enumerate(pose_order):
-        result = _blend_pose(result, source_frames[index], masks[index])
+        result = _blend_pose(result, effected_frames[index], effected_masks[index])
         value = 82 + int(((position + 1) / len(pose_order)) * 16)
         message = "Compositing sharp endpoints" if smear_enabled else "Compositing sharp poses"
         _notify(progress, value, message)
 
     _notify(progress, 100, "Composite ready")
-    returned_masks = masks if return_masks else []
-    return np.clip(result, 0, 255).astype(np.uint8), returned_masks
+    output_masks = returned_masks if return_masks else []
+    return np.clip(result, 0, 255).astype(np.uint8), output_masks

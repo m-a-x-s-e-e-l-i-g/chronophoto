@@ -142,6 +142,115 @@ QFrame#timelinePanel {
     border: 1px solid #303030;
     border-radius: 2px;
 }
+QFrame#effectsPanel {
+    background: #0c0c0c;
+    border: 1px solid #303030;
+    border-radius: 2px;
+}
+QScrollArea#effectsScroll, QWidget#effectsContainer {
+    background: #090909;
+    border: none;
+}
+QFrame#effectLane {
+    background: #101010;
+    border: 1px solid #343434;
+    border-radius: 1px;
+}
+QFrame#effectLane[bypassed="true"] {
+    background: #0b0b0b;
+    border-color: #242424;
+}
+QFrame#effectLane[bypassed="true"] QLabel,
+QFrame#effectLane[bypassed="true"] QWidget#effectGraph {
+    color: #5e5e5e;
+}
+QLabel#effectName {
+    color: #e2e2e2;
+    font-size: 11px;
+    font-weight: 700;
+    letter-spacing: 1px;
+}
+QLabel#effectMeta, QLabel#effectValue, QLabel#effectEmpty {
+    color: #777777;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 1px;
+}
+QLabel#effectEmpty {
+    padding: 4px 2px 2px 22px;
+    letter-spacing: 0;
+}
+QLabel#effectDragHandle {
+    color: #777777;
+    min-width: 18px;
+    font-weight: 700;
+}
+QLabel#effectDragHandle:hover { color: #eeeeee; }
+QToolButton#effectIconButton {
+    min-width: 24px;
+    min-height: 24px;
+    background: transparent;
+    color: #a0a0a0;
+    border: 1px solid transparent;
+}
+QToolButton#effectIconButton:hover, QToolButton#effectIconButton:focus {
+    color: #eeeeee;
+    border-color: #555555;
+}
+QToolButton#effectMoreButton {
+    min-width: 29px;
+    min-height: 26px;
+    background: transparent;
+    color: #b0b0b0;
+    border: 1px solid #3b3b3b;
+    font-weight: 700;
+}
+QToolButton#effectMoreButton:hover, QToolButton#effectMoreButton:focus {
+    color: #eeeeee;
+    background: #1b1b1b;
+    border-color: #777777;
+}
+QPushButton#effectAddButton, QPushButton#effectTextButton {
+    min-height: 26px;
+    background: transparent;
+    color: #a8a8a8;
+    border: 1px solid #3b3b3b;
+    padding: 0 8px;
+    font-size: 10px;
+    letter-spacing: 1px;
+}
+QPushButton#effectAddButton:hover, QPushButton#effectTextButton:hover {
+    color: #eeeeee;
+    background: #1b1b1b;
+    border-color: #777777;
+}
+QComboBox#effectPreset {
+    min-height: 26px;
+    max-width: 126px;
+    padding: 0 7px;
+    font-size: 10px;
+}
+QSpinBox#effectAmount {
+    min-height: 25px;
+    max-width: 74px;
+    padding: 0 6px;
+    font-size: 10px;
+}
+QSpinBox#effectKeyframeSpin {
+    min-height: 25px;
+    max-width: 58px;
+    padding: 0 5px;
+    font-size: 10px;
+}
+QMenu {
+    background: #111111;
+    color: #dddddd;
+    border: 1px solid #555555;
+    padding: 4px;
+}
+QMenu::item { padding: 7px 28px 7px 10px; }
+QMenu::item:selected { background: #eeeeee; color: #090909; }
+QMenu::item:disabled { color: #555555; }
 QLabel#timecode, QLabel#valueLabel {
     color: #d0d0d0;
     font-size: 12px;

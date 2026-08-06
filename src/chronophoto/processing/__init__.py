@@ -5,6 +5,16 @@ from chronophoto.processing.compositor import (
     build_compose_cache,
     compose_sequence,
 )
+from chronophoto.processing.effects import (
+    EFFECT_DEFAULT_AMOUNTS,
+    EFFECT_KINDS,
+    EFFECT_LABELS,
+    EFFECT_NEUTRAL_VALUES,
+    EffectKeyframe,
+    EffectTrack,
+    effect_preset,
+    neutral_effect_track,
+)
 from chronophoto.processing.sources import (
     MediaSequence,
     load_image_sequence,
@@ -17,13 +27,21 @@ from chronophoto.processing.sources import (
 __all__ = [
     "ComposeCache",
     "ComposeSettings",
+    "EFFECT_DEFAULT_AMOUNTS",
+    "EFFECT_KINDS",
+    "EFFECT_LABELS",
+    "EFFECT_NEUTRAL_VALUES",
+    "EffectKeyframe",
+    "EffectTrack",
     "MediaSequence",
     "align_sequence",
     "build_compose_cache",
     "compose_sequence",
+    "effect_preset",
     "load_image_sequence",
     "load_video_sequence",
     "load_video_thumbnails",
+    "neutral_effect_track",
     "order_image_paths",
     "select_video_sequence",
 ]

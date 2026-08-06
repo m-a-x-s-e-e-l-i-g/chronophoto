@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import cv2
 import numpy as np
+import pytest
 
 from chronophoto.processing.compositor import (
     CLEAN_PLATE_MAX_FRAMES,
+    ComposeCache,
     ComposeSettings,
     _clean_plate_frames,
     _dense_clone_step_count,
@@ -13,6 +15,7 @@ from chronophoto.processing.compositor import (
     build_compose_cache,
     compose_sequence,
 )
+from chronophoto.processing.effects import EffectKeyframe, EffectTrack, neutral_effect_track
 
 
 def moving_subject_frames(count: int = 7) -> list[np.ndarray]:
@@ -225,3 +228,67 @@ def test_settings_use_low_sensitivity_and_soft_edge_defaults() -> None:
     assert settings.threshold == 17
     assert settings.feather == 1
     assert settings.smear_style == "none"
+
+
+def test_opacity_effect_uses_explicit_normalized_frame_progress() -> None:
+    frames = moving_subject_frames(3)
+    background = np.full_like(frames[0], (34, 38, 42))
+    masks = []
+    for index in range(3):
+        mask = np.zeros(frames[0].shape[:2], dtype=np.uint8)
+        left = 24 + index * 34
+        mask[35:133, left : left + 25] = 255
+        masks.append(mask)
+    cache = ComposeCache(background, masks)
+    track = EffectTrack(
+        "opacity",
+        (
+            EffectKeyframe(0.0, 0.0),
+            EffectKeyframe(0.5, 100.0),
+            EffectKeyframe(1.0, 0.0),
+        ),
+    )
+
+    result, returned_masks = compose_sequence(
+        frames,
+        ComposeSettings(effect_tracks=(track,)),
+        cache=cache,
+        effect_progress=(0.0, 0.5, 1.0),
+    )
+
+    assert np.array_equal(result[90, 36], background[90, 36])
+    assert result[90, 70, 0] > 180
+    assert np.array_equal(result[90, 104], background[90, 104])
+    assert returned_masks[0][90, 36] == 1.0
+
+
+@pytest.mark.parametrize("smear_style", ["photographic", "dense_clones"])
+def test_effects_apply_to_generated_smear_pixels(smear_style: str) -> None:
+    frames = moving_subject_frames(4)
+    settings = ComposeSettings(
+        threshold=18,
+        feather=0,
+        background="median",
+        smear_style=smear_style,
+        effect_tracks=(
+            EffectTrack(
+                "opacity",
+                (EffectKeyframe(0.0, 0.0), EffectKeyframe(1.0, 0.0)),
+            ),
+        ),
+    )
+
+    result, _ = compose_sequence(frames, settings)
+    background = build_background(frames, "median")
+
+    assert np.array_equal(result, background)
+
+
+def test_effect_progress_requires_one_chronological_value_per_frame() -> None:
+    frames = moving_subject_frames(3)
+    settings = ComposeSettings(effect_tracks=(neutral_effect_track("opacity"),))
+
+    with pytest.raises(ValueError, match="match"):
+        compose_sequence(frames, settings, effect_progress=(0.0, 1.0))
+    with pytest.raises(ValueError, match="chronological"):
+        compose_sequence(frames, settings, effect_progress=(0.0, 0.8, 0.5))

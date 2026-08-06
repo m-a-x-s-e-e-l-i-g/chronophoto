@@ -321,6 +321,15 @@ class RangeSlider(QWidget):
         self.high = 820
         self._active: str | None = None
         self._thumbnails: list[QImage] = []
+        self._compact = False
+
+    def set_compact(self, compact: bool) -> None:
+        if self._compact == compact:
+            return
+        self._compact = compact
+        self.setMinimumHeight(42 if compact else 78)
+        self.updateGeometry()
+        self.update()
 
     def set_thumbnails(self, thumbnails: Sequence[QImage]) -> None:
         self._thumbnails = [thumbnail.copy() for thumbnail in thumbnails]
@@ -337,7 +346,7 @@ class RangeSlider(QWidget):
         self.range_changed.emit(self.low, self.high)
 
     def _track(self) -> QRectF:
-        return QRectF(12, self.height() - 17, self.width() - 24, 4)
+        return QRectF(12, self.height() - (12 if self._compact else 17), self.width() - 24, 4)
 
     def _x_for_value(self, value: int) -> float:
         track = self._track()
@@ -354,7 +363,7 @@ class RangeSlider(QWidget):
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         track = self._track()
 
-        if self._thumbnails:
+        if self._thumbnails and not self._compact:
             strip = QRectF(12, 4, self.width() - 24, 48)
             cell_width = strip.width() / len(self._thumbnails)
             painter.save()

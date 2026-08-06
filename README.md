@@ -78,8 +78,37 @@ your own footage first.
 - Connect poses with **Photographic stretch** or **Dense cloned copies**, or
   leave smear appearance set to **None** for distinct poses.
 - Pinch or two-finger scroll to zoom around the pointer, then drag to pan.
+- Stack keyframed opacity, saturation, blur, JPEG, stippling, dithering, and
+  halftone effects across the subject's motion.
 - Export full-resolution PNG, TIFF, or JPEG files.
 - See whether the installed version is current or a new GitHub release exists.
+
+## Shape effects across the trail
+
+Open the **Effects** timeline beneath the source range and add any combination
+of subject effects. Each effect has its own independent lane and stays clipped
+to the detected person—the background and clean plate remain unchanged.
+
+Start with `0 → 100 → 0`, `0 → 100`, or `100 → 0`, then drag the keyframes or
+enter exact position and value percentages. Effect positions use normalized
+motion progress, so the curve survives changes to the in/out range, pose count,
+disabled frames, and overlap order.
+
+- **Opacity** fades copies in and out.
+- **Saturation** moves between grayscale and the original colour.
+- **Blur** uses a configurable maximum radius in output pixels.
+- **JPEG quality** runs from visibly damaged at 0% to clean at 100%.
+- **Stippling, dithering, and halftone** each have independent intensity curves
+  and pattern-size controls.
+
+Drag lanes to change processing order, or bypass one temporarily without losing
+its keyframes. Dense clones and photographic stretch inherit the same effects
+between their original source frames.
+
+![Chronophoto with independent opacity, blur, and halftone effect lanes](docs/images/chronophoto-effect-timeline.png)
+
+*Effect lanes stay aligned with the selected source range while the photograph
+remains the main workspace.*
 
 ## Real-footage examples
 
