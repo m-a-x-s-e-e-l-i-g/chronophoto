@@ -326,6 +326,41 @@ def test_blend_mode_lane_exposes_all_modes_and_commits_selection() -> None:
     window.close()
 
 
+def test_blend_mode_lanes_can_be_stacked_in_both_effect_scopes() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = ChronophotoWindow()
+    window.resize(1500, 900)
+    window.show()
+    app.processEvents()
+
+    with QSignalBlocker(window.trail_effect_timeline):
+        multiply = window.trail_effect_timeline.add_effect("blend_mode")
+        screen = window.trail_effect_timeline.add_effect("blend_mode")
+        first_blur = window.trail_effect_timeline.add_effect("blur")
+        repeated_blur = window.trail_effect_timeline.add_effect("blur")
+        assert screen.mode_combo is not None
+        screen.mode_combo.setCurrentIndex(screen.mode_combo.findData("screen"))
+    assert multiply is not screen
+    assert first_blur is repeated_blur
+    assert multiply.mode_combo is not None
+    assert [track.option for track in window.trail_effect_timeline.tracks()[:2]] == [
+        "multiply",
+        "screen",
+    ]
+    assert multiply.name_label.text().startswith("BLEND")
+    assert screen.name_label.text().startswith("BLEND")
+
+    with QSignalBlocker(window.background_effect_timeline):
+        background_multiply = window.background_effect_timeline.add_effect("blend_mode")
+        background_overlay = window.background_effect_timeline.add_effect("blend_mode")
+    assert background_multiply is not background_overlay
+    assert [track.kind for track in window.background_effect_timeline.tracks()] == [
+        "blend_mode",
+        "blend_mode",
+    ]
+    window.close()
+
+
 def test_effect_keyframe_graph_emits_live_and_committed_updates() -> None:
     _app = QApplication.instance() or QApplication([])
     graph = EffectKeyframeGraph(

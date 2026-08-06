@@ -106,7 +106,8 @@ disabled frames, and overlap order.
 - **Blend mode** mixes each pose with the composite beneath it. Choose from 27
   familiar modes including Multiply, Screen, Overlay, Soft Light, Difference,
   Hue, Color, and Luminosity, then keyframe the strength from Normal to the
-  selected mode.
+  selected mode. Add Blend Mode repeatedly to build an order-dependent stack;
+  each lane receives the composited result of the lane beneath it.
 - **Saturation** moves between grayscale and the original colour.
 - **Blur** uses a configurable maximum radius in output pixels.
 - **JPEG quality** runs from visibly damaged at 0% to clean at 100%.

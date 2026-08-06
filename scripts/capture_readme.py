@@ -100,8 +100,12 @@ def main() -> int:
         halftone.preset.setCurrentIndex(halftone.preset.findData("fall"))
         halftone.amount_spin.setValue(8)
     with QSignalBlocker(window.background_effect_timeline):
-        saturation = window.background_effect_timeline.add_effect("saturation")
-        saturation.value_spin.setValue(20)
+        multiply = window.background_effect_timeline.add_effect("blend_mode")
+        screen = window.background_effect_timeline.add_effect("blend_mode")
+        assert screen.mode_combo is not None
+        screen.mode_combo.setCurrentIndex(screen.mode_combo.findData("screen"))
+        multiply._toggle_collapsed()
+        screen._toggle_collapsed()
     window.trail_effect_timeline.set_expanded(False)
     window.background_effect_timeline.set_expanded(True)
     window.render_preview()

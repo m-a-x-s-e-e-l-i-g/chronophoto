@@ -15,7 +15,12 @@ from chronophoto.processing.compositor import (
     build_compose_cache,
     compose_sequence,
 )
-from chronophoto.processing.effects import EffectKeyframe, EffectTrack, neutral_effect_track
+from chronophoto.processing.effects import (
+    EffectKeyframe,
+    EffectTrack,
+    blend_mode_rgb,
+    neutral_effect_track,
+)
 
 
 def moving_subject_frames(count: int = 7) -> list[np.ndarray]:
@@ -284,6 +289,34 @@ def test_blend_mode_uses_the_existing_composite_as_its_backdrop() -> None:
     assert result[20, 18] == pytest.approx(expected_first, abs=1.0)
     assert result[20, 56] == pytest.approx(expected_second, abs=1.0)
     assert np.array_equal(result[2, 2], background[2, 2])
+
+
+def test_blend_mode_tracks_stack_against_the_previous_lane_result() -> None:
+    background = np.full((4, 4, 3), (80, 120, 160), dtype=np.uint8)
+    source = np.full_like(background, (210, 70, 40))
+    frames = [source, background.copy()]
+    masks = [np.full((4, 4), 255, dtype=np.uint8), np.zeros((4, 4), dtype=np.uint8)]
+    full = (EffectKeyframe(0.0, 100.0), EffectKeyframe(1.0, 100.0))
+    multiply = EffectTrack("blend_mode", full, option="multiply")
+    screen = EffectTrack("blend_mode", full, option="screen")
+
+    stacked, _ = compose_sequence(
+        frames,
+        ComposeSettings(trail_effect_tracks=(multiply, screen)),
+        cache=ComposeCache(background, masks),
+    )
+    reversed_stack, _ = compose_sequence(
+        frames,
+        ComposeSettings(trail_effect_tracks=(screen, multiply)),
+        cache=ComposeCache(background, masks),
+    )
+
+    first_lane = blend_mode_rgb(
+        background.astype(np.float32), source.astype(np.float32), "multiply"
+    )
+    expected = blend_mode_rgb(first_lane, source.astype(np.float32), "screen")
+    assert stacked[0, 0] == pytest.approx(expected[0, 0], abs=1.0)
+    assert not np.array_equal(stacked, reversed_stack)
 
 
 def test_zero_blend_strength_is_identical_to_normal_compositing() -> None:

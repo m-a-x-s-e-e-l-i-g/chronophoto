@@ -319,6 +319,7 @@ class EffectLane(QFrame):
         self.setObjectName("effectLane")
         self._track = track
         self._keyframed = keyframed
+        self._narrow = False
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 6, 8, 8)
         layout.setSpacing(5)
@@ -334,8 +335,8 @@ class EffectLane(QFrame):
         self.collapse_button.setArrowType(Qt.ArrowType.DownArrow)
         self.collapse_button.setToolTip("Collapse effect lane")
         self.collapse_button.clicked.connect(self._toggle_collapsed)
-        label = QLabel(EFFECT_LABELS[track.kind].upper())
-        label.setObjectName("effectName")
+        self.name_label = QLabel(EFFECT_LABELS[track.kind].upper())
+        self.name_label.setObjectName("effectName")
         self.enabled_box = QCheckBox("ON")
         self.enabled_box.setChecked(track.enabled)
         self.enabled_box.setToolTip("Bypass this effect without losing its settings")
@@ -364,7 +365,7 @@ class EffectLane(QFrame):
         self.more_button.hide()
         header.addWidget(self.drag_handle)
         header.addWidget(self.collapse_button)
-        header.addWidget(label)
+        header.addWidget(self.name_label)
         header.addWidget(self.enabled_box)
         header.addStretch()
         header.addWidget(self.preset)
@@ -460,6 +461,7 @@ class EffectLane(QFrame):
         self.position_label.setVisible(keyframed)
         self.position_spin.setVisible(keyframed)
         self.graph.setVisible(keyframed)
+        self._sync_name_label()
         self._sync_enabled_style()
 
     @property
@@ -532,6 +534,7 @@ class EffectLane(QFrame):
         with QSignalBlocker(self.preset):
             self.preset.setCurrentIndex(0)
         self.graph.set_keyframes(self._track.keyframes)
+        self._sync_name_label()
         self._sync_enabled_style()
         self.track_committed.emit(self._track)
 
@@ -543,7 +546,17 @@ class EffectLane(QFrame):
         if self.mode_combo is None or self.mode_combo.currentData() is None:
             return
         self._replace_track(option=str(self.mode_combo.currentData()))
+        self._sync_name_label()
         self.track_committed.emit(self._track)
+
+    def _sync_name_label(self) -> None:
+        if self._track.kind == "blend_mode":
+            separator = "/" if self._narrow else " · "
+            self.name_label.setText(
+                f"BLEND{separator}{BLEND_MODE_LABELS[self._track.option].upper()}"
+            )
+            return
+        self.name_label.setText(EFFECT_LABELS[self._track.kind].upper())
 
     def _keyframes_changing(self, keyframes: object) -> None:
         with QSignalBlocker(self.preset):
@@ -583,6 +596,8 @@ class EffectLane(QFrame):
     def set_compact(self, compact: bool) -> None:
         self.graph.setMinimumHeight(50 if compact else 60)
         narrow = compact or self.window().width() < 1100 or self.width() < 650
+        self._narrow = narrow
+        self._sync_name_label()
         self.reset_button.setVisible(not narrow)
         self.remove_button.setVisible(not narrow)
         self.more_button.setVisible(narrow)
@@ -598,7 +613,8 @@ class EffectLane(QFrame):
         if self.mode_label is not None:
             self.mode_label.setVisible(not narrow)
         if self.mode_combo is not None:
-            self.mode_combo.setFixedWidth(144 if narrow else 184)
+            self.mode_combo.setMinimumContentsLength(10 if narrow else 16)
+            self.mode_combo.setFixedWidth(126 if narrow else 184)
         self.graph.setVisible(self._keyframed)
         self.layout().invalidate()
         self.updateGeometry()
@@ -704,18 +720,15 @@ class EffectTimelinePanel(QFrame):
             lane.set_compact(compact)
         self.lane_layout.invalidate()
         self.lane_container.updateGeometry()
-        self.setMinimumHeight(
-            132
-            if self._lanes and self._expanded and self._keyframed
-            else 82
-            if self._lanes and self._expanded
-            else 0
-        )
+        self.setMinimumHeight(self._expanded_minimum_height())
 
     def add_effect(self, kind: str) -> EffectLane:
         if kind not in EFFECT_KINDS:
             raise ValueError(f"unsupported effect: {kind}")
-        existing = next((lane for lane in self._lanes if lane.track.kind == kind), None)
+        existing = next(
+            (lane for lane in self._lanes if lane.track.kind == kind and kind != "blend_mode"),
+            None,
+        )
         if existing is not None:
             existing.show()
             return existing
@@ -746,8 +759,11 @@ class EffectTimelinePanel(QFrame):
         menu = QMenu(self)
         active = {lane.track.kind for lane in self._lanes}
         for kind in EFFECT_KINDS:
-            action = menu.addAction(EFFECT_LABELS[kind])
-            action.setEnabled(kind not in active)
+            label = EFFECT_LABELS[kind]
+            if kind == "blend_mode" and kind in active:
+                label = "Blend mode · add another"
+            action = menu.addAction(label)
+            action.setEnabled(kind == "blend_mode" or kind not in active)
             action.triggered.connect(lambda checked=False, selected=kind: self.add_effect(selected))
         menu.exec(self.add_button.mapToGlobal(self.add_button.rect().bottomLeft()))
 
@@ -785,13 +801,16 @@ class EffectTimelinePanel(QFrame):
             if has_lanes
             else f"NO EFFECTS · {self._scope}"
         )
-        self.setMinimumHeight(
-            132
-            if has_lanes and self._expanded and self._keyframed
-            else 82
-            if has_lanes and self._expanded
-            else 0
-        )
+        self.setMinimumHeight(self._expanded_minimum_height())
+
+    def _expanded_minimum_height(self) -> int:
+        if not self._lanes or not self._expanded:
+            return 0
+        if self._keyframed:
+            return 132
+        if self._compact:
+            return 82
+        return min(128, 82 + max(0, len(self._lanes) - 1) * 38)
 
     def _drag_started(self, lane: object) -> None:
         self._drag_lane = lane if isinstance(lane, EffectLane) else None

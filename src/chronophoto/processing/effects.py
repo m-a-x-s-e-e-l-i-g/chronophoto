@@ -531,20 +531,23 @@ def apply_background_effect_tracks(
     source = processed.astype(np.float32)
     alpha_3d = alpha[..., None]
     composite = source * alpha_3d + backdrop * (1.0 - alpha_3d)
+    stacked_mode = False
     for track in active:
         if track.kind != "blend_mode":
             continue
         strength = track.value_at(0.5) / 100.0
         if strength <= 0.00001 or track.option == "normal":
             continue
+        mode_backdrop = composite if stacked_mode else backdrop
         if track.option == "dissolve":
             height, width = alpha.shape
             y, x = np.indices((height, width), dtype=np.uint32)
             noise = ((x * 1597334677) ^ (y * 3812015801)) & 0xFFFF
             visible = noise.astype(np.float32) / 65535.0 < alpha
-            mode_composite = np.where(visible[..., None], source, backdrop)
+            mode_composite = np.where(visible[..., None], source, mode_backdrop)
         else:
-            mode_source = blend_mode_rgb(backdrop, source, track.option)
-            mode_composite = mode_source * alpha_3d + backdrop * (1.0 - alpha_3d)
+            mode_source = blend_mode_rgb(mode_backdrop, source, track.option)
+            mode_composite = mode_source * alpha_3d + mode_backdrop * (1.0 - alpha_3d)
         composite = composite * (1.0 - strength) + mode_composite * strength
+        stacked_mode = True
     return np.clip(composite, 0.0, 255.0).astype(np.uint8)

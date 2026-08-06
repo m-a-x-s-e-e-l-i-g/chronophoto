@@ -159,6 +159,23 @@ def test_background_effects_process_a_duplicate_of_the_clean_plate() -> None:
     assert np.array_equal(hidden_blur, background)
 
 
+def test_background_blend_modes_stack_in_track_order() -> None:
+    background = np.full((6, 8, 3), (80, 120, 160), dtype=np.uint8)
+    full = (EffectKeyframe(0.0, 100.0), EffectKeyframe(1.0, 100.0))
+    multiply = EffectTrack("blend_mode", full, option="multiply")
+    screen = EffectTrack("blend_mode", full, option="screen")
+
+    stacked = apply_background_effect_tracks(background, (multiply, screen))
+    reversed_stack = apply_background_effect_tracks(background, (screen, multiply))
+
+    first_lane = blend_mode_rgb(
+        background.astype(np.float32), background.astype(np.float32), "multiply"
+    )
+    expected = blend_mode_rgb(first_lane, background.astype(np.float32), "screen")
+    assert stacked[0, 0] == pytest.approx(expected[0, 0], abs=1.0)
+    assert not np.array_equal(stacked, reversed_stack)
+
+
 def test_opacity_only_changes_the_subject_alpha() -> None:
     frame, mask = subject_fixture()
     track = EffectTrack(

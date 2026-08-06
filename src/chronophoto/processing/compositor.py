@@ -339,12 +339,14 @@ def _blend_region(
     alpha_3d = np.clip(alpha, 0.0, 1.0)[..., None]
     normal = source * alpha_3d + target * (1.0 - alpha_3d)
     composite = normal
+    stacked_mode = False
     for track in blend_tracks:
         if not track.enabled or track.kind != "blend_mode":
             continue
         strength = track.value_at(effect_progress) / 100.0
         if strength <= 0.00001 or track.option == "normal":
             continue
+        mode_backdrop = composite if stacked_mode else target
         if track.option == "dissolve":
             height, width = alpha.shape
             y, x = np.indices((height, width), dtype=np.uint32)
@@ -352,11 +354,12 @@ def _blend_region(
             y += np.uint32(max(0, origin[1]))
             noise = ((x * 1597334677) ^ (y * 3812015801)) & 0xFFFF
             visible = noise.astype(np.float32) / 65535.0 < alpha
-            mode_composite = np.where(visible[..., None], source, target)
+            mode_composite = np.where(visible[..., None], source, mode_backdrop)
         else:
-            mode_source = blend_mode_rgb(target, source, track.option)
-            mode_composite = mode_source * alpha_3d + target * (1.0 - alpha_3d)
+            mode_source = blend_mode_rgb(mode_backdrop, source, track.option)
+            mode_composite = mode_source * alpha_3d + mode_backdrop * (1.0 - alpha_3d)
         composite = composite * (1.0 - strength) + mode_composite * strength
+        stacked_mode = True
     return composite
 
 
