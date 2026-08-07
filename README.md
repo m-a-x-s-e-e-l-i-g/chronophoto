@@ -59,9 +59,11 @@ and motion masks locally, then keeps them cached while you refine the result.
 ### 3. Choose how time should look
 
 - Open **Trail video**, choose a duration in seconds, press **Play**, and export
-  a full-resolution H.264 MP4 with the selected source audio.
+  a full-resolution H.264 MP4 with the selected source audio. The overlap
+  setting chooses the single sharp endpoint above each causal trail window.
 - Open **Composite**, choose every frame or a smaller pose count, and export a
-  PNG, TIFF, JPEG, or editable layer package.
+  PNG, TIFF, JPEG, or editable layer package. Select an enabled frame and turn
+  on **Focus selected pose** to place that pose above the chronological stack.
 
 ![Chronophoto workspace showing the Trail video preview and a 0.7 second duration](docs/images/motion-trail-ui.png)
 
@@ -234,7 +236,10 @@ the in and out points, changing the pose selection, and adjusting the composite
 can reuse that work instead of finding every frame again.
 
 The frame list and scrubber stay available while a new preview is being built.
-Full-resolution export reads the selected source range again for final quality.
+Choose **Preview · Fast**, **Balanced**, **High**, or **Source** in the workspace
+header to trade responsiveness for inspection detail. This choice is remembered.
+Full-resolution export reads the selected source range again for final quality,
+regardless of the preview setting.
 
 ## Inspect the edges when you need to
 
@@ -412,8 +417,8 @@ macOS, and Linux. The **Build release** workflow produces all desktop packages
 when it is started manually or when a matching version tag is pushed.
 
 ```bash
-git tag v0.3.0
-git push origin v0.3.0
+git tag v0.4.0
+git push origin v0.4.0
 ```
 
 The tag must match `project.version` in `pyproject.toml`. Tagged builds publish

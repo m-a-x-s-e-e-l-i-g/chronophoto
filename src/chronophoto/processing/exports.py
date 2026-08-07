@@ -9,7 +9,7 @@ import numpy as np
 from numpy.typing import NDArray
 from PIL import Image
 
-from chronophoto.processing.compositor import ComposeSettings
+from chronophoto.processing.compositor import ComposeSettings, _pose_stack_order
 from chronophoto.processing.effects import apply_background_effect_tracks, apply_effect_tracks
 
 ImageArray = NDArray[np.uint8]
@@ -32,6 +32,7 @@ def build_export_layers(
     effect_progress: list[float],
     *,
     pixel_scale: float = 1.0,
+    top_pose_index: int | None = None,
 ) -> ExportLayers:
     """Build clean transparent pose cutouts plus the processed clean plate."""
 
@@ -60,9 +61,7 @@ def build_export_layers(
         poses.append(np.dstack((pose_rgb, alpha)))
 
     combined = np.zeros_like(poses[0])
-    order = range(len(poses))
-    if settings.overlap == "oldest":
-        order = reversed(range(len(poses)))
+    order = _pose_stack_order(len(poses), settings.overlap, top_pose_index)
     for index in order:
         combined = _alpha_over(combined, poses[index])
 

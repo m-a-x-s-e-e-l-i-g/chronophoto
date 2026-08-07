@@ -337,6 +337,32 @@ def test_blend_mode_tracks_stack_against_the_previous_lane_result() -> None:
     assert not np.array_equal(stacked, reversed_stack)
 
 
+@pytest.mark.parametrize("overlap", ["newest", "oldest"])
+def test_selected_pose_can_be_composited_above_the_chronological_stack(
+    overlap: str,
+) -> None:
+    colors = ((210, 40, 30), (30, 210, 70), (40, 80, 220))
+    frames = [np.full((4, 4, 3), color, dtype=np.uint8) for color in colors]
+    background = np.zeros_like(frames[0])
+    masks = [np.full((4, 4), 255, dtype=np.uint8) for _ in frames]
+
+    result, _ = compose_sequence(
+        frames,
+        ComposeSettings(overlap=overlap),
+        cache=ComposeCache(background, masks),
+        top_pose_index=1,
+    )
+
+    assert np.array_equal(result[0, 0], colors[1])
+
+
+def test_selected_top_pose_must_exist_in_the_sequence() -> None:
+    frames = moving_subject_frames(2)
+
+    with pytest.raises(IndexError, match="top pose index"):
+        compose_sequence(frames, top_pose_index=2)
+
+
 def test_zero_blend_strength_is_identical_to_normal_compositing() -> None:
     frames = moving_subject_frames(3)
     cache = build_compose_cache(frames, ComposeSettings())

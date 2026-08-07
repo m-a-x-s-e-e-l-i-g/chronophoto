@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event
+from typing import Literal
 
 import numpy as np
 from PIL import Image, ImageOps
@@ -35,7 +36,6 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMainWindow,
     QMessageBox,
-    QProgressBar,
     QPushButton,
     QScrollArea,
     QSplitter,
@@ -66,6 +66,7 @@ from chronophoto.processing import (
 from chronophoto.processing.sources import VideoInfo, probe_video
 from chronophoto.ui.effects import EffectTimelinePanel
 from chronophoto.ui.widgets import (
+    BackgroundTaskView,
     DropSurface,
     PreviewCanvas,
     RangeSlider,
@@ -85,6 +86,9 @@ from chronophoto.updates import (
 
 class TaskCancelled(RuntimeError):
     pass
+
+
+TaskKind = Literal["preview", "export"]
 
 
 @dataclass(slots=True)
@@ -110,6 +114,7 @@ class RenderRequest:
     video_duration: float
     video_frame_rate: float
     enabled_video_indices: tuple[int, ...] | None
+    focus_pose_index: int | None
     source_dimensions: tuple[int, int]
 
 
@@ -121,14 +126,19 @@ class VideoAnalysisCache:
 
 
 class TaskWorker(QObject):
-    finished = Signal(object)
-    failed = Signal(str)
-    cancelled = Signal()
-    progress = Signal(int, str)
+    finished = Signal(str, object)
+    failed = Signal(str, str)
+    cancelled = Signal(str)
+    progress = Signal(str, int, str)
 
-    def __init__(self, task: Callable[[Callable[[int, str], None]], object]) -> None:
+    def __init__(
+        self,
+        task: Callable[[Callable[[int, str], None]], object],
+        task_kind: TaskKind = "preview",
+    ) -> None:
         super().__init__()
         self.task = task
+        self.task_kind = task_kind
         self._cancel = Event()
 
     def request_cancel(self) -> None:
@@ -139,23 +149,29 @@ class TaskWorker(QObject):
         def report(value: int, message: str) -> None:
             if self._cancel.is_set():
                 raise TaskCancelled
-            self.progress.emit(value, message)
+            self.progress.emit(self.task_kind, value, message)
 
         try:
             result = self.task(report)
             if self._cancel.is_set():
                 raise TaskCancelled
         except TaskCancelled:
-            self.cancelled.emit()
+            self.cancelled.emit(self.task_kind)
             return
         except Exception as exc:  # noqa: BLE001 - translated into a recoverable UI state
-            self.failed.emit(str(exc))
+            self.failed.emit(self.task_kind, str(exc))
             return
-        self.finished.emit(result)
+        self.finished.emit(self.task_kind, result)
 
 
 class ChronophotoWindow(QMainWindow):
     PREVIEW_MAX_DIMENSION = 960
+    PREVIEW_QUALITY_DIMENSIONS: dict[str, int | None] = {
+        "fast": 640,
+        "balanced": PREVIEW_MAX_DIMENSION,
+        "high": 1440,
+        "source": None,
+    }
 
     def __init__(self, *, check_updates: bool = False) -> None:
         super().__init__()
@@ -177,10 +193,13 @@ class ChronophotoWindow(QMainWindow):
         self._video_preview_cache_sequence: MediaSequence | None = None
         self._video_analysis_cache: VideoAnalysisCache | None = None
         self._video_frame_selection_key: tuple[object, ...] | None = None
+        self._focus_pose_key: str | int | None = None
         self._timeline_thumbnails: list[np.ndarray] = []
-        self._thread: QThread | None = None
-        self._worker: TaskWorker | None = None
+        self._task_threads: dict[TaskKind, QThread] = {}
+        self._task_workers: dict[TaskKind, TaskWorker] = {}
+        self._task_callbacks: dict[TaskKind, Callable[[object], None]] = {}
         self._pending_preview = False
+        self._preview_revision = 0
         self._preview_dirty = False
         self._updating_frames = False
         self._loading_source = False
@@ -430,6 +449,14 @@ class ChronophotoWindow(QMainWindow):
         self.frame_list.itemChanged.connect(self._frame_state_changed)
         self.frame_list.currentRowChanged.connect(self._frame_selected)
         self.frame_list.model().rowsMoved.connect(self._frame_order_moved)
+        self.focus_pose_button = QPushButton("Focus selected pose")
+        self.focus_pose_button.setObjectName("focusPoseButton")
+        self.focus_pose_button.setCheckable(True)
+        self.focus_pose_button.setAccessibleName("Place selected pose on top")
+        self.focus_pose_button.setToolTip(
+            "Composite the selected enabled pose last; all other poses keep their stack order"
+        )
+        self.focus_pose_button.toggled.connect(self._focus_pose_toggled)
         move_row = QHBoxLayout()
         self.move_up_button = QPushButton("Move up")
         self.move_up_button.setObjectName("quietButton")
@@ -441,6 +468,7 @@ class ChronophotoWindow(QMainWindow):
         move_row.addWidget(self.move_down_button)
         frames_layout.addLayout(frames_header)
         frames_layout.addWidget(self.frame_list, 1)
+        frames_layout.addWidget(self.focus_pose_button)
         frames_layout.addLayout(move_row)
         layout.addWidget(self.frames_section, 1)
 
@@ -463,10 +491,24 @@ class ChronophotoWindow(QMainWindow):
         top.setSpacing(10)
         self.preview_heading = QLabel("Untitled study")
         self.preview_heading.setObjectName("workspaceTitle")
+        self.preview_quality = ScrollSafeComboBox()
+        self.preview_quality.setObjectName("previewQuality")
+        self.preview_quality.setAccessibleName("Preview quality")
+        self.preview_quality.addItem("Preview · Fast", "fast")
+        self.preview_quality.addItem("Preview · Balanced", "balanced")
+        self.preview_quality.addItem("Preview · High", "high")
+        self.preview_quality.addItem("Preview · Source", "source")
+        self.preview_quality.setFixedWidth(148)
+        saved_quality = str(self.settings_store.value("preview_quality", "balanced"))
+        saved_index = self.preview_quality.findData(saved_quality)
+        self.preview_quality.setCurrentIndex(saved_index if saved_index >= 0 else 1)
+        self.preview_quality.currentIndexChanged.connect(self._preview_quality_changed)
+        self._sync_preview_quality_tooltip()
         self.result_meta = QLabel("Load footage to begin")
         self.result_meta.setObjectName("bodyMuted")
         top.addWidget(self.preview_heading)
         top.addStretch()
+        top.addWidget(self.preview_quality)
         top.addWidget(self.result_meta)
         layout.addWidget(self.workspace_header)
 
@@ -896,24 +938,16 @@ class ChronophotoWindow(QMainWindow):
         self.status_text.setObjectName("statusText")
         self.status_detail = QLabel("Choose a source to start a motion study")
         self.status_detail.setObjectName("bodyMuted")
-        self.cancel_button = QPushButton("Cancel")
-        self.cancel_button.setObjectName("quietButton")
-        self.cancel_button.clicked.connect(self._cancel_task)
         self.open_export_button = QPushButton("Open folder")
         self.open_export_button.setObjectName("quietButton")
         self.open_export_button.clicked.connect(self._open_export_folder)
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 100)
-        self.progress.setValue(0)
-        self.progress.setTextVisible(False)
-        self.progress.setFixedWidth(150)
+        self.background_tasks = BackgroundTaskView()
+        self.background_tasks.cancel_requested.connect(self._cancel_task)
         layout.addWidget(self.status_text)
         layout.addWidget(self.status_detail)
         layout.addStretch()
-        layout.addWidget(self.cancel_button)
         layout.addWidget(self.open_export_button)
-        layout.addWidget(self.progress)
-        self.cancel_button.hide()
+        layout.addWidget(self.background_tasks)
         self.open_export_button.hide()
         return bar
 
@@ -932,7 +966,6 @@ class ChronophotoWindow(QMainWindow):
     def _set_drop_overlay_active(self, active: bool) -> None:
         if not hasattr(self, "drop_overlay"):
             return
-        active = active and self._thread is None
         if not active:
             self.drop_overlay.hide()
             return
@@ -945,14 +978,14 @@ class ChronophotoWindow(QMainWindow):
         self.drop_overlay.show()
 
     def dragEnterEvent(self, event) -> None:  # type: ignore[no-untyped-def]
-        if self._thread is None and event.mimeData().hasUrls():
+        if event.mimeData().hasUrls():
             self._set_drop_overlay_active(True)
             event.acceptProposedAction()
             return
         event.ignore()
 
     def dragMoveEvent(self, event) -> None:  # type: ignore[no-untyped-def]
-        if self._thread is None and event.mimeData().hasUrls():
+        if event.mimeData().hasUrls():
             event.acceptProposedAction()
             return
         event.ignore()
@@ -964,7 +997,7 @@ class ChronophotoWindow(QMainWindow):
     def dropEvent(self, event) -> None:  # type: ignore[no-untyped-def]
         self._set_drop_overlay_active(False)
         paths = [url.toLocalFile() for url in event.mimeData().urls() if url.isLocalFile()]
-        if paths and self._thread is None:
+        if paths:
             self._accept_paths(paths)
             event.acceptProposedAction()
             return
@@ -997,20 +1030,13 @@ class ChronophotoWindow(QMainWindow):
 
     @Slot(list)
     def _accept_paths(self, raw_paths: list[str]) -> None:
-        if self._thread:
+        if not self._confirm_source_replacement():
             return
-        if self.source and (
-            self.trail_effect_timeline.tracks() or self.background_effect_timeline.tracks()
-        ):
-            answer = QMessageBox.question(
-                self,
-                "Replace footage?",
-                "Replacing the source will clear the trail and background effects.",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if answer != QMessageBox.StandardButton.Yes:
-                return
+        if self._task_active("export"):
+            self._cancel_task("export")
+        if self._task_active("preview"):
+            self._pending_preview = True
+            self._cancel_task("preview")
         try:
             self._loading_source = True
             kind, paths = classify_paths(raw_paths)
@@ -1062,7 +1088,36 @@ class ChronophotoWindow(QMainWindow):
             self._loading_source = False
             QMessageBox.warning(self, "Could not open source", self._friendly_error(str(exc)))
 
+    def _confirm_source_replacement(self) -> bool:
+        if not self.source:
+            return True
+        export_active = self._task_active("export")
+        clears_effects = bool(
+            self.trail_effect_timeline.tracks() or self.background_effect_timeline.tracks()
+        )
+        if not export_active and not clears_effects:
+            return True
+
+        dialog = QMessageBox(self)
+        dialog.setIcon(QMessageBox.Icon.Warning)
+        dialog.setWindowTitle("Replace footage?")
+        if export_active:
+            dialog.setText("Replacing the source will cancel the active export.")
+        else:
+            dialog.setText("Replace the current source footage?")
+        if clears_effects:
+            dialog.setInformativeText("Trail and background effects will also be cleared.")
+        replace_label = "Replace and cancel export" if export_active else "Replace footage"
+        replace_button = dialog.addButton(replace_label, QMessageBox.ButtonRole.AcceptRole)
+        keep_button = dialog.addButton("Keep current source", QMessageBox.ButtonRole.RejectRole)
+        dialog.setDefaultButton(keep_button)
+        dialog.setEscapeButton(keep_button)
+        dialog.exec()
+        return dialog.clickedButton() is replace_button
+
     def _clear_preview_state(self) -> None:
+        self._preview_revision += 1
+        self._clear_focus_pose(schedule=False)
         self.preview_result = None
         self.preview_frames = []
         self.preview_masks = []
@@ -1081,11 +1136,46 @@ class ChronophotoWindow(QMainWindow):
         self.range_slider.set_thumbnails([])
         self.playback_timer.stop()
 
+    def _preview_quality_key(self) -> str:
+        key = str(self.preview_quality.currentData())
+        if key not in self.PREVIEW_QUALITY_DIMENSIONS:
+            return "balanced"
+        return key
+
+    def _preview_max_dimension(self) -> int | None:
+        return self.PREVIEW_QUALITY_DIMENSIONS[self._preview_quality_key()]
+
+    def _sync_preview_quality_tooltip(self) -> None:
+        key = self._preview_quality_key()
+        dimensions = {
+            "fast": "640 px maximum dimension for the quickest response.",
+            "balanced": "960 px maximum dimension, recommended for most work.",
+            "high": "1440 px maximum dimension for closer inspection.",
+            "source": "Full source resolution; uses more time and memory.",
+        }
+        self.preview_quality.setToolTip(
+            f"{dimensions[key]} Exports always use full source resolution."
+        )
+
+    @Slot(int)
+    def _preview_quality_changed(self, _index: int) -> None:
+        self.settings_store.setValue("preview_quality", self._preview_quality_key())
+        self._sync_preview_quality_tooltip()
+        self._preview_cache_key = None
+        self._preview_cache_sequence = None
+        self._video_preview_cache_key = None
+        self._video_preview_cache_sequence = None
+        self._video_analysis_cache = None
+        self._timeline_thumbnails = []
+        self.range_slider.set_thumbnails([])
+        self._schedule_preview()
+
     def _clear_frame_list(self) -> None:
         self._updating_frames = True
         self.frame_list.clear()
         self._updating_frames = False
         self._update_frame_count()
+        self._sync_focus_pose_control()
 
     def _populate_photo_frames(self, paths: list[Path], mode: str) -> None:
         ordered = order_image_paths(paths, mode)
@@ -1102,8 +1192,12 @@ class ChronophotoWindow(QMainWindow):
             self.frame_list.addItem(item)
         self._updating_frames = False
         self._update_frame_count()
+        self._restore_focus_selection()
+        self._sync_focus_pose_control()
 
     def _populate_video_frames(self, labels: list[str], selection_key: tuple[object, ...]) -> None:
+        if self._video_frame_selection_key != selection_key:
+            self._clear_focus_pose(schedule=False)
         self._updating_frames = True
         self.frame_list.clear()
         self.frame_list.setDragDropMode(QAbstractItemView.DragDropMode.NoDragDrop)
@@ -1116,6 +1210,8 @@ class ChronophotoWindow(QMainWindow):
         self._updating_frames = False
         self._video_frame_selection_key = selection_key
         self._update_frame_count()
+        self._restore_focus_selection()
+        self._sync_focus_pose_control()
 
     def _ordered_photo_paths(self) -> tuple[Path, ...]:
         paths: list[Path] = []
@@ -1145,16 +1241,128 @@ class ChronophotoWindow(QMainWindow):
             if self.frame_list.item(row).checkState() == Qt.CheckState.Checked
         )
 
+    def _focus_pose_index(
+        self,
+        paths: tuple[Path, ...],
+        enabled_video_indices: tuple[int, ...] | None,
+    ) -> int | None:
+        if self._focus_pose_key is None:
+            return None
+        if self.source and self.source.kind == "video":
+            if enabled_video_indices is None or not isinstance(self._focus_pose_key, int):
+                return None
+            try:
+                return enabled_video_indices.index(self._focus_pose_key)
+            except ValueError:
+                return None
+        focus_path = str(self._focus_pose_key)
+        try:
+            return tuple(str(path) for path in paths).index(focus_path)
+        except ValueError:
+            return None
+
+    @Slot(bool)
+    def _focus_pose_toggled(self, checked: bool) -> None:
+        if self._updating_frames:
+            return
+        if checked:
+            item = self.frame_list.currentItem()
+            if item is None or item.checkState() != Qt.CheckState.Checked:
+                with QSignalBlocker(self.focus_pose_button):
+                    self.focus_pose_button.setChecked(False)
+                self._focus_pose_key = None
+            else:
+                self._focus_pose_key = item.data(Qt.ItemDataRole.UserRole)
+        else:
+            self._focus_pose_key = None
+        self._sync_focus_pose_control()
+        self._schedule_preview()
+
+    def _clear_focus_pose(self, *, schedule: bool) -> None:
+        had_focus = self._focus_pose_key is not None
+        self._focus_pose_key = None
+        if hasattr(self, "focus_pose_button"):
+            with QSignalBlocker(self.focus_pose_button):
+                self.focus_pose_button.setChecked(False)
+            self._sync_focus_pose_control()
+        if had_focus and schedule:
+            self._schedule_preview()
+
+    def _restore_focus_selection(self) -> None:
+        if self._focus_pose_key is None:
+            return
+        for row in range(self.frame_list.count()):
+            if self.frame_list.item(row).data(Qt.ItemDataRole.UserRole) == self._focus_pose_key:
+                self.frame_list.setCurrentRow(row)
+                return
+        self._clear_focus_pose(schedule=False)
+
+    def _sync_focus_pose_control(self) -> None:
+        item = self.frame_list.currentItem()
+        can_focus = bool(
+            self.source and item is not None and item.checkState() == Qt.CheckState.Checked
+        )
+        self.focus_pose_button.setEnabled(can_focus)
+        if self._focus_pose_key is None:
+            self.focus_pose_button.setText("Focus selected pose")
+            self.focus_pose_button.setAccessibleDescription(
+                "Select an enabled frame, then place its pose above the chronological stack"
+            )
+            return
+        focused_label = next(
+            (
+                self.frame_list.item(row).text()
+                for row in range(self.frame_list.count())
+                if self.frame_list.item(row).data(Qt.ItemDataRole.UserRole) == self._focus_pose_key
+            ),
+            "Selected pose",
+        )
+        if len(focused_label) > 24:
+            focused_label = f"{focused_label[:21]}…"
+        self.focus_pose_button.setText(f"FOCUS · {focused_label}")
+        self.focus_pose_button.setAccessibleDescription(
+            "The selected pose is composited last, above the chronological stack"
+        )
+
     def _frame_state_changed(self) -> None:
         if self._updating_frames:
             return
+        focused_item = next(
+            (
+                self.frame_list.item(row)
+                for row in range(self.frame_list.count())
+                if self.frame_list.item(row).data(Qt.ItemDataRole.UserRole) == self._focus_pose_key
+            ),
+            None,
+        )
+        if focused_item is not None and focused_item.checkState() != Qt.CheckState.Checked:
+            self._clear_focus_pose(schedule=False)
         self._update_frame_count()
+        self._sync_focus_pose_control()
         self._schedule_preview()
 
     def _frame_selected(self, row: int) -> None:
-        if row < 0 or not self.preview_frames or not self.source:
+        if row < 0 or not self.source:
+            self._sync_focus_pose_control()
             return
         item = self.frame_list.item(row)
+        if self.focus_pose_button.isChecked():
+            next_key = (
+                item.data(Qt.ItemDataRole.UserRole)
+                if item.checkState() == Qt.CheckState.Checked
+                else None
+            )
+            if next_key != self._focus_pose_key:
+                self._focus_pose_key = next_key
+                if next_key is None:
+                    with QSignalBlocker(self.focus_pose_button):
+                        self.focus_pose_button.setChecked(False)
+                self._sync_focus_pose_control()
+                self._schedule_preview()
+        else:
+            self._sync_focus_pose_control()
+        if not self.preview_frames:
+            return
         if self.source.kind == "video":
             source_index = int(item.data(Qt.ItemDataRole.UserRole))
             enabled = [
@@ -1339,6 +1547,7 @@ class ChronophotoWindow(QMainWindow):
                 raise ValueError("Enable at least two photographs")
             with Image.open(paths[0]) as image:
                 source_dimensions = ImageOps.exif_transpose(image).size
+        focus_pose_index = None if motion_video else self._focus_pose_index(paths, enabled_indices)
         cache_key = (
             self.source.kind,
             tuple(str(path) for path in paths),
@@ -1362,6 +1571,7 @@ class ChronophotoWindow(QMainWindow):
             video_duration=video_duration,
             video_frame_rate=video_frame_rate,
             enabled_video_indices=enabled_indices,
+            focus_pose_index=focus_pose_index,
             source_dimensions=source_dimensions,
         )
 
@@ -1369,12 +1579,13 @@ class ChronophotoWindow(QMainWindow):
     def render_preview(self) -> None:
         if not self.source:
             return
-        if self._thread:
+        if self._task_active("preview"):
             self._pending_preview = True
+            self._cancel_task("preview")
             return
         self.preview_debounce.stop()
         try:
-            request = self._render_request(self.PREVIEW_MAX_DIMENSION)
+            request = self._render_request(self._preview_max_dimension())
         except ValueError as exc:
             self.status_text.setText("CHECK FRAMES")
             self.status_detail.setText(str(exc))
@@ -1411,6 +1622,7 @@ class ChronophotoWindow(QMainWindow):
             request.kind == "video"
             and self._video_frame_selection_key != request.video_selection_key
         )
+        revision = self._preview_revision
 
         def task(progress: Callable[[int, str], None]):
             video_cache = cached_video_sequence
@@ -1521,6 +1733,7 @@ class ChronophotoWindow(QMainWindow):
                         frames,
                         request.source_dimensions,
                     ),
+                    top_pose_index=request.focus_pose_index,
                 )
                 aligned = frames
                 if render_trail:
@@ -1586,6 +1799,7 @@ class ChronophotoWindow(QMainWindow):
                         aligned,
                         request.source_dimensions,
                     ),
+                    top_pose_index=request.focus_pose_index,
                 )
             return {
                 "result": result,
@@ -1606,6 +1820,7 @@ class ChronophotoWindow(QMainWindow):
                 "video_selection_key": request.video_selection_key,
                 "trail_frames": trail_frames,
                 "trail_timestamps": trail_timestamps,
+                "revision": revision,
             }
 
         if request.kind == "video" and cached_video_sequence is not None:
@@ -1614,11 +1829,14 @@ class ChronophotoWindow(QMainWindow):
             task_detail = "Building video frame cache"
         else:
             task_detail = "Rendering preview"
-        self._start_task(task, self._preview_finished, task_detail)
+        self._start_task(task, self._preview_finished, task_detail, task_kind="preview")
 
     @Slot(object)
     def _preview_finished(self, payload: object) -> None:
         data = dict(payload)  # type: ignore[arg-type]
+        if data["revision"] != self._preview_revision:
+            self._pending_preview = True
+            return
         self.preview_result = data["result"]
         self.preview_masks = data["masks"]
         self.preview_frames = data["frames"]
@@ -1661,7 +1879,7 @@ class ChronophotoWindow(QMainWindow):
                 detail = f"Recomposed from {cached_total} cached frames and masks"
         else:
             detail = "Inspect Source or Mask, then export"
-        self._finish_task("PREVIEW READY", detail)
+        self._finish_task("preview", "PREVIEW READY", detail)
 
     @Slot()
     def export_motion_video(self) -> None:
@@ -1669,11 +1887,9 @@ class ChronophotoWindow(QMainWindow):
             not self.source
             or self.source.kind != "video"
             or not self.source.video_info
-            or self._thread
+            or self._task_active("export")
         ):
             return
-        self.preview_debounce.stop()
-        self._pending_preview = False
         try:
             request = self._render_request(None, motion_video=True)
         except ValueError as exc:
@@ -1737,27 +1953,34 @@ class ChronophotoWindow(QMainWindow):
             )
             return written, len(aligned), aligned[-1]
 
-        self._start_task(task, self._video_export_finished, "Rendering motion-trail video")
+        def on_finished(payload: object) -> None:
+            self._video_export_finished(payload, request.paths)
 
-    @Slot(object)
-    def _video_export_finished(self, payload: object) -> None:
+        self._start_task(
+            task,
+            on_finished,
+            "Rendering motion-trail video",
+            task_kind="export",
+        )
+
+    def _video_export_finished(self, payload: object, source_paths: tuple[Path, ...]) -> None:
         path, frame_count, last_frame = payload  # type: ignore[misc]
         self._last_export_path = Path(path)
         self.open_export_button.show()
-        self.result_meta.setText(
-            f"Motion trail · {last_frame.shape[1]} × {last_frame.shape[0]} · {frame_count} frames"
-        )
-        self._finish_task("VIDEO EXPORT COMPLETE", Path(path).name)
+        if self._current_source_paths() == source_paths:
+            self.result_meta.setText(
+                f"Motion trail · {last_frame.shape[1]} × {last_frame.shape[0]} · "
+                f"{frame_count} frames"
+            )
+        self._finish_task("export", "VIDEO EXPORT COMPLETE", Path(path).name)
 
     @Slot()
     def export_composite(self) -> None:
-        if not self.source or self._thread:
+        if not self.source or self._task_active("export"):
             return
         selections = self._export_selections()
         if not selections:
             return
-        self.preview_debounce.stop()
-        self._pending_preview = False
         try:
             request = self._render_request(None)
         except ValueError as exc:
@@ -1852,6 +2075,7 @@ class ChronophotoWindow(QMainWindow):
                     cache=analysis,
                     effect_progress=effect_progress,
                     effect_pixel_scale=1.0,
+                    top_pose_index=request.focus_pose_index,
                 )
                 progress(93, "Building transparent layers")
                 layers = build_export_layers(
@@ -1861,6 +2085,7 @@ class ChronophotoWindow(QMainWindow):
                     request.settings,
                     list(effect_progress),
                     pixel_scale=1.0,
+                    top_pose_index=request.focus_pose_index,
                 )
                 progress(97, "Writing transparent layers")
                 if package_export:
@@ -1887,6 +2112,7 @@ class ChronophotoWindow(QMainWindow):
                 return_masks=False,
                 effect_progress=effect_progress,
                 effect_pixel_scale=1.0,
+                top_pose_index=request.focus_pose_index,
             )
             progress(97, "Writing image")
             image = Image.fromarray(result)
@@ -1899,21 +2125,26 @@ class ChronophotoWindow(QMainWindow):
                 image.save(export_path, compress_level=6)
             return export_path, result, 1
 
-        self._start_task(task, self._export_finished, "Composing full resolution")
+        def on_finished(payload: object) -> None:
+            self._export_finished(payload, request.paths)
 
-    @Slot(object)
-    def _export_finished(self, payload: object) -> None:
+        self._start_task(
+            task,
+            on_finished,
+            "Composing full resolution",
+            task_kind="export",
+        )
+
+    def _export_finished(self, payload: object, source_paths: tuple[Path, ...]) -> None:
         path, result, output_count = payload  # type: ignore[misc]
-        self.preview_result = result
-        self._preview_dirty = False
         self._last_export_path = Path(path)
-        self._set_preview_mode("composite")
-        self.result_meta.setText(f"Full resolution · {result.shape[1]} × {result.shape[0]}")
+        if self._current_source_paths() == source_paths:
+            self.result_meta.setText(f"Full resolution · {result.shape[1]} × {result.shape[0]}")
         self.open_export_button.show()
         detail = Path(path).name
         if Path(path).is_dir():
             detail = f"{output_count} PNG files · {detail}"
-        self._finish_task("EXPORT COMPLETE", detail)
+        self._finish_task("export", "EXPORT COMPLETE", detail)
 
     @Slot()
     def _toggle_export_options(self) -> None:
@@ -1950,26 +2181,35 @@ class ChronophotoWindow(QMainWindow):
         else:
             count = len(selections)
             self.export_button.setText(f"Export {count} output{'s' if count != 1 else ''}")
-        is_busy = self._thread is not None if busy is None else busy
+        is_busy = self._task_active("export") if busy is None else busy
         enabled = self.source is not None and bool(selections) and not is_busy
         self.export_button.setEnabled(enabled)
+
+    def _task_active(self, task_kind: TaskKind) -> bool:
+        return task_kind in self._task_threads
+
+    def _current_source_paths(self) -> tuple[Path, ...]:
+        return tuple(self.source.paths) if self.source else ()
 
     def _start_task(
         self,
         task: Callable[[Callable[[int, str], None]], object],
         on_finished: Callable[[object], None],
         detail: str,
+        *,
+        task_kind: TaskKind = "preview",
     ) -> None:
-        self._set_busy(True)
-        self.status_text.setText("WORKING")
+        if self._task_active(task_kind):
+            raise RuntimeError(f"A {task_kind} task is already running")
+        self.status_text.setText("PREVIEWING" if task_kind == "preview" else "EXPORTING")
         self.status_detail.setText(detail)
-        self.progress.setValue(1)
+        self.background_tasks.start_task(task_kind, detail)
         thread = QThread(self)
-        worker = TaskWorker(task)
+        worker = TaskWorker(task, task_kind)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.progress.connect(self._update_progress)
-        worker.finished.connect(on_finished)
+        worker.finished.connect(self._task_result)
         worker.failed.connect(self._task_failed)
         worker.cancelled.connect(self._task_cancelled)
         worker.finished.connect(thread.quit)
@@ -1980,89 +2220,87 @@ class ChronophotoWindow(QMainWindow):
         worker.cancelled.connect(worker.deleteLater)
         thread.finished.connect(self._thread_stopped)
         thread.finished.connect(thread.deleteLater)
-        self._thread = thread
-        self._worker = worker
+        self._task_threads[task_kind] = thread
+        self._task_workers[task_kind] = worker
+        self._task_callbacks[task_kind] = on_finished
+        self._sync_task_controls()
         thread.start()
 
-    @Slot(int, str)
-    def _update_progress(self, value: int, message: str) -> None:
-        self.progress.setValue(value)
-        self.status_detail.setText(message)
+    @Slot(str, object)
+    def _task_result(self, task_kind: str, payload: object) -> None:
+        selected: TaskKind = "export" if task_kind == "export" else "preview"
+        callback = self._task_callbacks.get(selected)
+        if callback:
+            callback(payload)
 
-    @Slot(str)
-    def _task_failed(self, message: str) -> None:
+    @Slot(str, int, str)
+    def _update_progress(self, task_kind: TaskKind, value: int, message: str) -> None:
+        self.background_tasks.update_task(task_kind, value, message)
+
+    @Slot(str, str)
+    def _task_failed(self, task_kind: TaskKind, message: str) -> None:
         friendly = self._friendly_error(message)
-        self._finish_task("COULD NOT RENDER", friendly)
+        status = "COULD NOT RENDER" if task_kind == "preview" else "EXPORT FAILED"
+        self._finish_task(task_kind, status, friendly)
         QMessageBox.warning(self, "Processing stopped", friendly)
 
-    @Slot()
-    def _task_cancelled(self) -> None:
-        self._finish_task("CANCELLED", "The previous successful preview is still available")
+    @Slot(str)
+    def _task_cancelled(self, task_kind: TaskKind) -> None:
+        if task_kind == "preview" and self._pending_preview:
+            self.status_text.setText("PREVIEW OUT OF DATE")
+            self.status_detail.setText("Applying the latest changes next")
+            return
+        if task_kind == "preview":
+            detail = "The previous successful preview is still available"
+        else:
+            detail = "Export stopped; any file already finalized was kept"
+        self._finish_task(task_kind, "CANCELLED", detail)
 
-    def _finish_task(self, status: str, detail: str) -> None:
+    def _finish_task(self, task_kind: TaskKind, status: str, detail: str) -> None:
         self.status_text.setText(status)
         self.status_detail.setText(detail)
-        self.progress.setValue(0)
+        self.background_tasks.update_task(task_kind, 100, detail)
 
     @Slot()
     def _thread_stopped(self) -> None:
-        self._thread = None
-        self._worker = None
-        self._set_busy(False)
-        if self._close_when_done:
-            self._close_when_done = False
-            QTimer.singleShot(0, self.close)
+        thread = self.sender()
+        task_kind = next(
+            (kind for kind, active_thread in self._task_threads.items() if active_thread is thread),
+            None,
+        )
+        if task_kind is None:
             return
-        if self._pending_preview:
+        self._task_threads.pop(task_kind, None)
+        self._task_workers.pop(task_kind, None)
+        self._task_callbacks.pop(task_kind, None)
+        self.background_tasks.remove_task(task_kind)
+        self._sync_task_controls()
+        if self._close_when_done:
+            if not self._task_threads:
+                self._close_when_done = False
+                QTimer.singleShot(0, self.close)
+            return
+        if task_kind == "preview" and self._pending_preview:
             self._pending_preview = False
-            QTimer.singleShot(0, self.render_preview)
+            if not self.preview_debounce.isActive() and not self.effect_preview_throttle.isActive():
+                QTimer.singleShot(0, self.render_preview)
 
-    def _cancel_task(self) -> None:
-        if self._worker:
+    @Slot(str)
+    def _cancel_task(self, task_kind: str) -> None:
+        selected: TaskKind = "export" if task_kind == "export" else "preview"
+        worker = self._task_workers.get(selected)
+        if worker:
             self.status_text.setText("CANCELLING")
-            self.status_detail.setText("Stopping after the current processing step")
-            self._worker.request_cancel()
-            self.cancel_button.setEnabled(False)
+            self.status_detail.setText(f"Stopping the {selected} after the current step")
+            worker.request_cancel()
+            self.background_tasks.set_cancelling(selected)
 
-    def _set_busy(self, busy: bool) -> None:
+    def _sync_task_controls(self) -> None:
         loaded = self.source is not None
-        for control in (
-            self.video_button,
-            self.photos_button,
-            self.drop_surface,
-            self.export_button,
-            self.trail_video_button,
-            self.threshold,
-            self.feather,
-            self.background_mode,
-            self.overlap_mode,
-            self.smear_style,
-            self.alignment_mode,
-            self.photo_order_mode,
-            self.move_up_button,
-            self.move_down_button,
-            self.reset_button,
-            self.export_options_button,
-            self.trail_duration,
-        ):
-            control.setEnabled(
-                not busy
-                and (
-                    loaded or control in (self.video_button, self.photos_button, self.drop_surface)
-                )
-            )
         is_video = loaded and bool(self.source and self.source.kind == "video")
-        self.pose_count.setEnabled(is_video and not self.all_frames.isChecked())
-        self.all_frames.setEnabled(is_video)
-        self.range_slider.setEnabled(is_video)
-        self.trail_duration.setEnabled(is_video and not busy)
-        self.trail_video_button.setEnabled(is_video and not busy)
-        self.frame_list.setEnabled(loaded)
-        for checkbox in self.export_checks.values():
-            checkbox.setEnabled(loaded and not busy)
-        self._sync_export_controls(busy=busy)
-        self.cancel_button.setVisible(busy)
-        self.cancel_button.setEnabled(busy)
+        export_active = self._task_active("export")
+        self.trail_video_button.setEnabled(is_video and not export_active)
+        self._sync_export_controls(busy=export_active)
 
     def _set_loaded_state(self, loaded: bool) -> None:
         self.source_intro.setVisible(not loaded)
@@ -2099,27 +2337,29 @@ class ChronophotoWindow(QMainWindow):
         self.photo_order_control.setVisible(is_photo)
         self.move_up_button.setVisible(is_photo)
         self.move_down_button.setVisible(is_photo)
-        self._sync_export_controls(busy=False)
+        self._sync_focus_pose_control()
+        self._sync_task_controls()
 
     def _schedule_preview(self) -> None:
         if self._loading_source or not self.source:
             return
         self._mark_preview_dirty("Updating after your changes")
-        if self._thread:
-            self._pending_preview = True
-            return
         self.preview_debounce.start()
+        if self._task_active("preview"):
+            self._pending_preview = True
+            self._cancel_task("preview")
+            return
 
     @Slot()
     def _effect_tracks_changing(self) -> None:
         if self._loading_source or not self.source:
             return
         self._mark_preview_dirty("Effect settings changed · preview is catching up")
-        if self._thread:
-            self._pending_preview = True
-            return
         if not self.effect_preview_throttle.isActive():
             self.effect_preview_throttle.start()
+        if self._task_active("preview"):
+            self._pending_preview = True
+            self._cancel_task("preview")
 
     @Slot()
     def _effect_tracks_committed(self) -> None:
@@ -2129,10 +2369,9 @@ class ChronophotoWindow(QMainWindow):
         self.effect_preview_throttle.stop()
         self.preview_debounce.stop()
         self._mark_preview_dirty("Applying the latest effect settings")
-        if self._thread:
+        if self._task_active("preview"):
             self._pending_preview = True
-            if self._worker:
-                self._worker.request_cancel()
+            self._cancel_task("preview")
             return
         self.render_preview()
 
@@ -2149,6 +2388,7 @@ class ChronophotoWindow(QMainWindow):
         self._update_compact_workspace()
 
     def _mark_preview_dirty(self, detail: str) -> None:
+        self._preview_revision += 1
         self._preview_dirty = True
         self.status_text.setText("PREVIEW OUT OF DATE")
         self.status_detail.setText(detail)
@@ -2213,6 +2453,7 @@ class ChronophotoWindow(QMainWindow):
 
     def _reset_controls(self) -> None:
         self._loading_source = True
+        self._clear_focus_pose(schedule=False)
         with QSignalBlocker(self.all_frames):
             self.all_frames.setChecked(bool(self.source and self.source.kind == "video"))
         self._sync_all_frames_state()
@@ -2321,8 +2562,9 @@ class ChronophotoWindow(QMainWindow):
             and self.source
             and self.source.kind == "video"
         ):
-            if self._thread:
+            if self._task_active("preview"):
                 self._pending_preview = True
+                self._cancel_task("preview")
             else:
                 self.render_preview()
 
@@ -2445,11 +2687,16 @@ class ChronophotoWindow(QMainWindow):
         return f"{int(minutes):02d}:{remainder:05.2f}"
 
     def closeEvent(self, event: QCloseEvent) -> None:
-        if self._thread and self._worker:
+        self._pending_preview = False
+        self.preview_debounce.stop()
+        self.effect_preview_throttle.stop()
+        self.playback_timer.stop()
+        if self._task_threads:
             self._close_when_done = True
-            self._worker.request_cancel()
+            for task_kind in tuple(self._task_workers):
+                self._cancel_task(task_kind)
             self.status_text.setText("CANCELLING")
-            self.status_detail.setText("Closing after the current processing step")
+            self.status_detail.setText("Closing after background tasks stop")
             event.ignore()
             return
         event.accept()

@@ -682,6 +682,22 @@ def _apply_dense_clone_trail(
     return result
 
 
+def _pose_stack_order(
+    frame_count: int,
+    overlap: str,
+    top_pose_index: int | None = None,
+) -> list[int]:
+    if top_pose_index is not None and not 0 <= top_pose_index < frame_count:
+        raise IndexError("top pose index is outside the selected frames")
+    order = list(range(frame_count))
+    if overlap == "oldest":
+        order.reverse()
+    if top_pose_index is not None:
+        order.remove(top_pose_index)
+        order.append(top_pose_index)
+    return order
+
+
 def compose_sequence(
     frames: Sequence[ImageArray],
     settings: ComposeSettings | None = None,
@@ -693,6 +709,7 @@ def compose_sequence(
     trail_progress: Sequence[float] | None = None,
     effect_pixel_scale: float = 1.0,
     frame_contiguous: bool = False,
+    top_pose_index: int | None = None,
 ) -> tuple[ImageArray, list[NDArray[np.float32]]]:
     """Composite a chronological sequence and return the result plus pose masks."""
 
@@ -752,9 +769,7 @@ def compose_sequence(
         background = build_background(source_frames, settings.background)
         background_blur = cv2.GaussianBlur(background, (5, 5), 0)
 
-    order = list(range(len(source_frames)))
-    if settings.overlap == "oldest":
-        order.reverse()
+    order = _pose_stack_order(len(source_frames), settings.overlap, top_pose_index)
     smear_enabled = settings.smear_style != "none"
     active_trail_effects = tuple(track for track in settings.trail_effect_tracks if track.enabled)
     active_background_effects = tuple(
@@ -866,8 +881,14 @@ def compose_sequence(
 
     pose_order = order
     if smear_enabled:
-        endpoints = {0, len(source_frames) - 1}
-        pose_order = [index for index in order if index in endpoints]
+        if frame_contiguous:
+            top_endpoint = len(source_frames) - 1 if settings.overlap == "newest" else 0
+            pose_order = [top_endpoint]
+        else:
+            endpoints = {0, len(source_frames) - 1}
+            if top_pose_index is not None:
+                endpoints.add(top_pose_index)
+            pose_order = [index for index in order if index in endpoints]
     for position, index in enumerate(pose_order):
         result = _blend_pose(
             result,
@@ -878,7 +899,10 @@ def compose_sequence(
             trail_positions[index],
         )
         value = 82 + int(((position + 1) / len(pose_order)) * 16)
-        message = "Compositing sharp endpoints" if smear_enabled else "Compositing sharp poses"
+        if smear_enabled and frame_contiguous:
+            message = "Compositing sharp trail endpoint"
+        else:
+            message = "Compositing sharp endpoints" if smear_enabled else "Compositing sharp poses"
         _notify(progress, value, message)
 
     _notify(progress, 100, "Composite ready")

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from threading import Event
 from time import monotonic, sleep
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -10,7 +11,16 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 import numpy as np  # noqa: E402
 import pytest  # noqa: E402
 from PIL import Image  # noqa: E402
-from PySide6.QtCore import QMimeData, QPoint, QPointF, QSignalBlocker, Qt, QUrl  # noqa: E402
+from PySide6.QtCore import (  # noqa: E402
+    QMimeData,
+    QPoint,
+    QPointF,
+    QSettings,
+    QSignalBlocker,
+    Qt,
+    QThread,
+    QUrl,
+)
 from PySide6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QImage, QWheelEvent  # noqa: E402
 from PySide6.QtWidgets import QApplication, QSlider  # noqa: E402
 
@@ -78,6 +88,65 @@ def test_preview_is_automatic_without_a_manual_render_action() -> None:
     window.close()
 
 
+def test_preview_quality_is_persistent_and_rebuilds_only_preview_caches(monkeypatch) -> None:
+    _app = QApplication.instance() or QApplication([])
+    settings = QSettings("Chronophoto", "Chronophoto")
+    had_previous = settings.contains("preview_quality")
+    previous = settings.value("preview_quality")
+    settings.remove("preview_quality")
+    settings.sync()
+
+    window: ChronophotoWindow | None = None
+    restored_window: ChronophotoWindow | None = None
+    try:
+        window = ChronophotoWindow()
+        assert window.preview_quality.currentData() == "balanced"
+        assert window._preview_max_dimension() == 960
+
+        window.source = SourceState("video", [Path("quality.mp4")])
+        window._preview_cache_key = ("photo",)
+        window._preview_cache_sequence = object()  # type: ignore[assignment]
+        window._video_preview_cache_key = ("video",)
+        window._video_preview_cache_sequence = object()  # type: ignore[assignment]
+        window._video_analysis_cache = object()  # type: ignore[assignment]
+        window._timeline_thumbnails = [np.zeros((2, 2, 3), dtype=np.uint8)]
+        scheduled: list[bool] = []
+        monkeypatch.setattr(window, "_schedule_preview", lambda: scheduled.append(True))
+
+        window.preview_quality.setCurrentIndex(window.preview_quality.findData("fast"))
+        assert window._preview_max_dimension() == 640
+        assert window._preview_cache_key is None
+        assert window._preview_cache_sequence is None
+        assert window._video_preview_cache_key is None
+        assert window._video_preview_cache_sequence is None
+        assert window._video_analysis_cache is None
+        assert window._timeline_thumbnails == []
+        assert scheduled == [True]
+
+        window.preview_quality.setCurrentIndex(window.preview_quality.findData("high"))
+        assert window._preview_max_dimension() == 1440
+        window.preview_quality.setCurrentIndex(window.preview_quality.findData("source"))
+        assert window._preview_max_dimension() is None
+        assert "Exports always use full source resolution" in window.preview_quality.toolTip()
+        settings.sync()
+
+        window.close()
+        window = None
+        restored_window = ChronophotoWindow()
+        assert restored_window.preview_quality.currentData() == "source"
+        assert restored_window._preview_max_dimension() is None
+    finally:
+        if window is not None:
+            window.close()
+        if restored_window is not None:
+            restored_window.close()
+        if had_previous:
+            settings.setValue("preview_quality", previous)
+        else:
+            settings.remove("preview_quality")
+        settings.sync()
+
+
 def test_header_shows_version_github_and_update_state() -> None:
     _app = QApplication.instance() or QApplication([])
     window = ChronophotoWindow()
@@ -110,19 +179,252 @@ def test_workspace_still_has_room_at_minimum_window_size() -> None:
     window.close()
 
 
-def test_busy_state_blocks_source_replacement_but_keeps_navigation_live() -> None:
+def test_background_preview_keeps_editor_and_source_controls_live() -> None:
     _app = QApplication.instance() or QApplication([])
     window = ChronophotoWindow()
     window.source = SourceState("photos", [])
-    window._set_busy(True)
+    window._set_loaded_state(True)
+    window._task_threads["preview"] = QThread()
+    window.background_tasks.start_task("preview", "Rendering preview")
+    window._sync_task_controls()
 
-    assert not window.video_button.isEnabled()
-    assert not window.photos_button.isEnabled()
+    assert window.video_button.isEnabled()
+    assert window.photos_button.isEnabled()
+    assert window.threshold.isEnabled()
+    assert window.export_button.isEnabled()
     assert window.frame_list.isEnabled()
     assert window.pose_scrubber.isEnabled()
-    assert not window.cancel_button.isHidden()
+    assert not window.background_tasks.isHidden()
+    assert window.background_tasks.is_task_visible("preview")
 
-    window._set_busy(False)
+    window._task_threads.clear()
+    window.background_tasks.remove_task("preview")
+    window.close()
+
+
+def test_active_export_disables_only_duplicate_export_actions() -> None:
+    _app = QApplication.instance() or QApplication([])
+    window = ChronophotoWindow()
+    window.source = SourceState(
+        "video",
+        [Path("clip.mp4")],
+        VideoInfo(Path("clip.mp4"), 1.0, 640, 360, 24.0, 24),
+    )
+    window._set_loaded_state(True)
+    window._task_threads["export"] = QThread()
+    window.background_tasks.start_task("export", "Composing full resolution")
+    window._sync_task_controls()
+
+    assert window.video_button.isEnabled()
+    assert window.photos_button.isEnabled()
+    assert window.threshold.isEnabled()
+    assert window.range_slider.isEnabled()
+    assert window.export_options_button.isEnabled()
+    assert all(checkbox.isEnabled() for checkbox in window.export_checks.values())
+    assert not window.export_button.isEnabled()
+    assert not window.trail_video_button.isEnabled()
+
+    window._task_threads.clear()
+    window.background_tasks.remove_task("export")
+    window.close()
+
+
+def test_background_task_view_can_show_preview_and_export_together() -> None:
+    _app = QApplication.instance() or QApplication([])
+    window = ChronophotoWindow()
+
+    window.background_tasks.start_task("preview", "Recomposing cached frames")
+    window.background_tasks.start_task("export", "Writing motion-trail video")
+    window.background_tasks.update_task("preview", 42, "Building masks")
+
+    assert window.background_tasks.heading.text() == "BACKGROUND · 2 TASKS"
+    assert window.background_tasks.is_task_visible("preview")
+    assert window.background_tasks.is_task_visible("export")
+
+    window.background_tasks.remove_task("preview")
+    assert window.background_tasks.heading.text() == "BACKGROUND"
+    window.background_tasks.remove_task("export")
+    assert window.background_tasks.isHidden()
+    window.close()
+
+
+def test_preview_and_export_workers_run_concurrently_while_editor_stays_live() -> None:
+    app = QApplication.instance() or QApplication([])
+    window = ChronophotoWindow()
+    window.source = SourceState("photos", [])
+    window._set_loaded_state(True)
+    release = Event()
+    preview_started = Event()
+    export_started = Event()
+    results: list[str] = []
+
+    def waiting_task(kind: str, started: Event):
+        def task(progress):  # type: ignore[no-untyped-def]
+            progress(20, f"{kind.title()} started")
+            started.set()
+            release.wait(2)
+            progress(100, f"{kind.title()} complete")
+            return kind
+
+        return task
+
+    window._start_task(
+        waiting_task("preview", preview_started),
+        results.append,
+        "Rendering preview",
+        task_kind="preview",
+    )
+    window._start_task(
+        waiting_task("export", export_started),
+        results.append,
+        "Composing full resolution",
+        task_kind="export",
+    )
+    deadline = monotonic() + 2
+    while not (preview_started.is_set() and export_started.is_set()) and monotonic() < deadline:
+        app.processEvents()
+        sleep(0.01)
+
+    assert preview_started.is_set()
+    assert export_started.is_set()
+    assert window.background_tasks.heading.text() == "BACKGROUND · 2 TASKS"
+    assert window.export_checks["background"].isEnabled()
+    window.export_checks["background"].setChecked(True)
+    assert window.export_checks["background"].isChecked()
+
+    release.set()
+    deadline = monotonic() + 2
+    while window._task_threads and monotonic() < deadline:
+        app.processEvents()
+        sleep(0.01)
+
+    assert sorted(results) == ["export", "preview"]
+    assert not window._task_threads
+    window.close()
+
+
+def test_preview_change_cancels_stale_work_and_queues_latest() -> None:
+    _app = QApplication.instance() or QApplication([])
+    window = ChronophotoWindow()
+    window.source = SourceState("photos", [Path("one.jpg"), Path("two.jpg")])
+    window._set_loaded_state(True)
+    window._task_threads["preview"] = QThread()
+    cancelled: list[bool] = []
+
+    class FakeWorker:
+        def request_cancel(self) -> None:
+            cancelled.append(True)
+
+    window._task_workers["preview"] = FakeWorker()  # type: ignore[assignment]
+    window.background_tasks.start_task("preview", "Rendering preview")
+    revision = window._preview_revision
+
+    window._schedule_preview()
+
+    assert cancelled == [True]
+    assert window._pending_preview
+    assert window._preview_revision == revision + 1
+    assert window.preview_debounce.isActive()
+
+    window.preview_debounce.stop()
+    window._task_threads.clear()
+    window._task_workers.clear()
+    window.background_tasks.remove_task("preview")
+    window.close()
+
+
+def test_replacing_source_after_confirmation_cancels_active_export(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _app = QApplication.instance() or QApplication([])
+    window = ChronophotoWindow()
+    window.source = SourceState("photos", [Path("old-one.jpg"), Path("old-two.jpg")])
+    window._task_threads["export"] = QThread()
+    cancelled: list[str] = []
+    new_paths = [tmp_path / "new-one.png", tmp_path / "new-two.png"]
+    for index, path in enumerate(new_paths):
+        Image.fromarray(np.full((12, 16, 3), index * 40, dtype=np.uint8)).save(path)
+
+    monkeypatch.setattr(window, "_confirm_source_replacement", lambda: True)
+    monkeypatch.setattr(window, "_cancel_task", lambda kind: cancelled.append(kind))
+    monkeypatch.setattr(window, "render_preview", lambda: None)
+
+    window._accept_paths([str(path) for path in new_paths])
+
+    assert cancelled == ["export"]
+    assert window.source is not None
+    assert window.source.paths == new_paths
+
+    window._task_threads.clear()
+    window.close()
+
+
+def test_export_completion_does_not_overwrite_a_newer_preview(tmp_path: Path) -> None:
+    _app = QApplication.instance() or QApplication([])
+    window = ChronophotoWindow()
+    source_paths = (Path("one.jpg"), Path("two.jpg"))
+    window.source = SourceState("photos", list(source_paths))
+    preview = np.zeros((8, 12, 3), dtype=np.uint8)
+    window.preview_result = preview
+    window._preview_dirty = True
+    exported = np.full((16, 24, 3), 200, dtype=np.uint8)
+
+    window._export_finished((tmp_path / "export.png", exported, 1), source_paths)
+
+    assert window.preview_result is preview
+    assert window._preview_dirty
+    assert window.status_text.text() == "EXPORT COMPLETE"
+    window.close()
+
+
+def test_render_request_keeps_export_settings_snapshot(tmp_path: Path) -> None:
+    _app = QApplication.instance() or QApplication([])
+    paths = [tmp_path / "one.png", tmp_path / "two.png"]
+    for index, path in enumerate(paths):
+        Image.fromarray(np.full((12, 16, 3), index * 30, dtype=np.uint8)).save(path)
+    window = ChronophotoWindow()
+    window.source = SourceState("photos", paths)
+    window._populate_photo_frames(paths, "automatic")
+    window._set_loaded_state(True)
+    window.threshold.setValue(23)
+    window.preview_debounce.stop()
+
+    request = window._render_request(None)
+    window.threshold.setValue(57)
+    window.preview_debounce.stop()
+
+    assert request.settings.threshold == 23
+    assert window.threshold.value() == 57
+    window.close()
+
+
+def test_selected_frame_can_be_pinned_as_the_composite_focus_pose(tmp_path: Path) -> None:
+    _app = QApplication.instance() or QApplication([])
+    paths = [tmp_path / f"pose-{index}.png" for index in range(3)]
+    for index, path in enumerate(paths):
+        Image.fromarray(np.full((12, 16, 3), index * 30, dtype=np.uint8)).save(path)
+    window = ChronophotoWindow()
+    window.source = SourceState("photos", paths)
+    window._populate_photo_frames(paths, "input")
+    window._set_loaded_state(True)
+
+    window.frame_list.setCurrentRow(1)
+    assert window.focus_pose_button.isEnabled()
+    window.focus_pose_button.click()
+    window.preview_debounce.stop()
+
+    assert window.focus_pose_button.isChecked()
+    assert window.focus_pose_button.text().startswith("FOCUS · pose-1")
+    assert window._render_request(None).focus_pose_index == 1
+
+    window.frame_list.setCurrentRow(0)
+    window.preview_debounce.stop()
+    assert window._render_request(None).focus_pose_index == 0
+
+    window.focus_pose_button.click()
+    window.preview_debounce.stop()
+    assert not window.focus_pose_button.isChecked()
+    assert window._render_request(None).focus_pose_index is None
     window.close()
 
 
@@ -387,6 +689,8 @@ def test_motion_video_export_uses_every_frame_and_selected_duration(
     window.all_frames.setChecked(False)
     window.pose_count.setValue(2)
     window.trail_duration.setValue(750)
+    with QSignalBlocker(window.preview_quality):
+        window.preview_quality.setCurrentIndex(window.preview_quality.findData("fast"))
     frames: list[np.ndarray] = []
     for index in range(8):
         frame = np.full((32, 48, 3), (20, 40, 80), dtype=np.uint8)
@@ -399,10 +703,11 @@ def test_motion_video_export_uses_every_frame_and_selected_duration(
         [index / 4 for index in range(8)],
     )
     pose_counts: list[int | None] = []
+    max_dimensions: list[int | None] = []
 
     def load_sequence(*args, **kwargs):  # type: ignore[no-untyped-def]
-        del kwargs
         pose_counts.append(args[3])
+        max_dimensions.append(kwargs.get("max_dimension"))
         return sequence
 
     monkeypatch.setattr("chronophoto.ui.window.load_video_sequence", load_sequence)
@@ -426,14 +731,15 @@ def test_motion_video_export_uses_every_frame_and_selected_duration(
 
     monkeypatch.setattr("chronophoto.ui.window.write_motion_trail_video", write_video)
 
-    def run_now(task, on_finished, detail):  # type: ignore[no-untyped-def]
-        del detail
+    def run_now(task, on_finished, detail, *, task_kind="preview"):  # type: ignore[no-untyped-def]
+        del detail, task_kind
         on_finished(task(lambda value, message: None))
 
     monkeypatch.setattr(window, "_start_task", run_now)
     window.export_motion_video()
 
     assert pose_counts == [None]
+    assert max_dimensions == [None]
     assert exported["output"] == output
     assert exported["source"] == path
     assert exported["frame_count"] == 8
@@ -470,8 +776,8 @@ def test_layer_package_export_runs_once_and_writes_selected_outputs(monkeypatch,
         lambda *a, **k: str(tmp_path),
     )
 
-    def run_now(task, on_finished, detail):  # type: ignore[no-untyped-def]
-        del detail
+    def run_now(task, on_finished, detail, *, task_kind="preview"):  # type: ignore[no-untyped-def]
+        del detail, task_kind
         on_finished(task(lambda value, message: None))
 
     monkeypatch.setattr(window, "_start_task", run_now)
@@ -824,7 +1130,7 @@ def test_all_frames_request_tracks_the_committed_range(monkeypatch) -> None:
     window.all_frames.setChecked(True)
     window.preview_debounce.stop()
     window.range_slider.set_values(100, 900)
-    request = window._render_request(window.PREVIEW_MAX_DIMENSION)
+    request = window._render_request(window._preview_max_dimension())
     rendered: list[bool] = []
     monkeypatch.setattr(window, "render_preview", lambda: rendered.append(True))
 
@@ -859,7 +1165,7 @@ def test_range_render_reuses_the_file_level_video_cache(monkeypatch) -> None:
         (96, 64),
         [index / 10 for index in range(10)],
     )
-    request = window._render_request(window.PREVIEW_MAX_DIMENSION)
+    request = window._render_request(window._preview_max_dimension())
     window._video_preview_cache_key = request.video_cache_key
     window._video_preview_cache_sequence = cached
     decoder_calls: list[bool] = []
@@ -871,11 +1177,11 @@ def test_range_render_reuses_the_file_level_video_cache(monkeypatch) -> None:
     monkeypatch.setattr("chronophoto.ui.window.load_video_sequence", unexpected_decode)
     window.render_preview()
     deadline = monotonic() + 5
-    while window._thread is not None and monotonic() < deadline:
+    while window._task_active("preview") and monotonic() < deadline:
         app.processEvents()
         sleep(0.01)
 
-    assert window._thread is None
+    assert not window._task_active("preview")
     assert decoder_calls == []
     assert len(window.preview_frames) == 5
     assert "frames and masks" in window.status_detail.text()
@@ -892,11 +1198,11 @@ def test_range_render_reuses_the_file_level_video_cache(monkeypatch) -> None:
     window.preview_debounce.stop()
     window.render_preview()
     deadline = monotonic() + 5
-    while window._thread is not None and monotonic() < deadline:
+    while window._task_active("preview") and monotonic() < deadline:
         app.processEvents()
         sleep(0.01)
 
-    assert window._thread is None
+    assert not window._task_active("preview")
     assert analysis_builds == []
     assert "cached frames and masks" in window.status_detail.text()
 
@@ -905,11 +1211,11 @@ def test_range_render_reuses_the_file_level_video_cache(monkeypatch) -> None:
         lane.preset.setCurrentIndex(lane.preset.findData("rise_fall"))
     window.render_preview()
     deadline = monotonic() + 5
-    while window._thread is not None and monotonic() < deadline:
+    while window._task_active("preview") and monotonic() < deadline:
         app.processEvents()
         sleep(0.01)
 
-    assert window._thread is None
+    assert not window._task_active("preview")
     assert decoder_calls == []
     assert analysis_builds == []
     assert "cached frames and masks" in window.status_detail.text()
@@ -920,11 +1226,11 @@ def test_range_render_reuses_the_file_level_video_cache(monkeypatch) -> None:
         background_lane._constant_value_committed()
     window.render_preview()
     deadline = monotonic() + 5
-    while window._thread is not None and monotonic() < deadline:
+    while window._task_active("preview") and monotonic() < deadline:
         app.processEvents()
         sleep(0.01)
 
-    assert window._thread is None
+    assert not window._task_active("preview")
     assert decoder_calls == []
     assert analysis_builds == []
     assert "cached frames and masks" in window.status_detail.text()
@@ -1035,13 +1341,13 @@ def test_selecting_a_frame_updates_navigation_without_scheduling_a_render() -> N
 
 def test_worker_can_cancel_before_expensive_work() -> None:
     worker = TaskWorker(lambda progress: progress(50, "Halfway"))
-    cancelled: list[bool] = []
-    worker.cancelled.connect(lambda: cancelled.append(True))
+    cancelled: list[str] = []
+    worker.cancelled.connect(cancelled.append)
 
     worker.request_cancel()
     worker.run()
 
-    assert cancelled == [True]
+    assert cancelled == ["preview"]
 
 
 def test_export_filter_adds_the_matching_extension() -> None:

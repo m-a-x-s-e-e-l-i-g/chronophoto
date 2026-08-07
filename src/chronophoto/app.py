@@ -303,6 +303,26 @@ QPushButton#quietButton {
     border: 1px solid #3d3d3d;
     padding: 0 10px;
 }
+QPushButton#focusPoseButton {
+    min-height: 30px;
+    background: #111111;
+    color: #9d9d9d;
+    border: 1px solid #414141;
+    padding: 0 10px;
+    font-size: 10px;
+    letter-spacing: 0.5px;
+}
+QPushButton#focusPoseButton:hover { color: #eeeeee; border-color: #777777; }
+QPushButton#focusPoseButton:checked {
+    background: #e7e7e7;
+    color: #090909;
+    border-color: #e7e7e7;
+}
+QPushButton#focusPoseButton:disabled {
+    background: #101010;
+    color: #4f4f4f;
+    border-color: #292929;
+}
 QPushButton#primaryButton:disabled, QPushButton#secondaryButton:disabled {
     background: #171717;
     color: #565656;
@@ -332,6 +352,14 @@ QComboBox QAbstractItemView {
     selection-color: #090909;
     border: 1px solid #545454;
 }
+QComboBox#previewQuality {
+    min-height: 28px;
+    max-height: 28px;
+    color: #a8a8a8;
+    font-size: 11px;
+    padding-left: 9px;
+}
+QComboBox#previewQuality:hover { color: #eeeeee; border-color: #666666; }
 QSlider::groove:horizontal {
     height: 3px;
     background: #3b3b3b;
@@ -423,6 +451,45 @@ QFrame#statusBar {
     border-top: 1px solid #303030;
 }
 QLabel#statusText { color: #e5e5e5; }
+QFrame#backgroundTaskView {
+    background: #141414;
+    border: 1px solid #3a3a3a;
+    border-radius: 2px;
+}
+QLabel#backgroundTaskHeading {
+    color: #777777;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 1px;
+}
+QFrame#backgroundTaskRow { background: transparent; border: none; }
+QLabel#backgroundTaskKind {
+    color: #e2e2e2;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1px;
+}
+QLabel#backgroundTaskDetail {
+    color: #9a9a9a;
+    font-size: 10px;
+}
+QProgressBar#backgroundTaskProgress {
+    height: 3px;
+    background: #303030;
+    border: none;
+}
+QProgressBar#backgroundTaskProgress::chunk { background: #eeeeee; }
+QPushButton#taskCancelButton {
+    min-height: 22px;
+    max-height: 22px;
+    padding: 0 8px;
+    color: #a8a8a8;
+    background: transparent;
+    border: 1px solid #3d3d3d;
+    font-size: 10px;
+}
+QPushButton#taskCancelButton:hover { color: #eeeeee; border-color: #777777; }
+QPushButton#taskCancelButton:disabled { color: #555555; border-color: #2c2c2c; }
 QProgressBar {
     height: 3px;
     background: #303030;
