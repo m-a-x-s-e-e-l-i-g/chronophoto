@@ -26,6 +26,12 @@ from chronophoto.processing.exports import (
     build_export_layers,
     write_export_package,
 )
+from chronophoto.processing.motion_video import (
+    compose_motion_trail_frame,
+    motion_trail_window,
+    render_motion_trail_sequence,
+    write_motion_trail_video,
+)
 from chronophoto.processing.sources import (
     MediaSequence,
     load_image_sequence,
@@ -56,12 +62,16 @@ __all__ = [
     "blend_mode_rgb",
     "build_export_layers",
     "compose_sequence",
+    "compose_motion_trail_frame",
     "effect_preset",
     "load_image_sequence",
     "load_video_sequence",
     "load_video_thumbnails",
+    "motion_trail_window",
     "neutral_effect_track",
     "order_image_paths",
     "select_video_sequence",
+    "render_motion_trail_sequence",
     "write_export_package",
+    "write_motion_trail_video",
 ]

@@ -380,6 +380,20 @@ class EffectLane(QFrame):
         details_layout.setSpacing(4)
         value_row = QHBoxLayout()
         value_row.setSpacing(7)
+        self.timing_label = QLabel("EFFECT TIMING")
+        self.timing_label.setObjectName("effectMeta")
+        self.timing_combo = ScrollSafeComboBox()
+        self.timing_combo.setObjectName("effectTiming")
+        self.timing_combo.setAccessibleName("Effect timing")
+        self.timing_combo.addItem("FULL MOVEMENT", "movement")
+        self.timing_combo.addItem("TRAIL DURATION", "trail")
+        self.timing_combo.setCurrentIndex(self.timing_combo.findData(track.timing_basis))
+        self.timing_combo.setFixedWidth(152)
+        self.timing_combo.setToolTip(
+            "Full movement runs the curve once across the clip. Trail duration runs it "
+            "from the oldest visible trail position to the current subject in Trail video."
+        )
+        self.timing_combo.currentIndexChanged.connect(self._timing_changed)
         self.position_label = QLabel("POSITION")
         self.position_label.setObjectName("effectMeta")
         self.position_spin = ScrollSafeSpinBox()
@@ -396,6 +410,8 @@ class EffectLane(QFrame):
         self.value_spin.setRange(0, 100)
         self.value_spin.setSuffix("%")
         self.value_spin.valueChanged.connect(self._numeric_keyframe_changing)
+        value_row.addWidget(self.timing_label)
+        value_row.addWidget(self.timing_combo)
         value_row.addWidget(self.position_label)
         value_row.addWidget(self.position_spin)
         value_row.addWidget(self.value_label)
@@ -458,6 +474,8 @@ class EffectLane(QFrame):
             with QSignalBlocker(self.preset):
                 self.preset.setCurrentIndex(self.preset.findData("full"))
         self.preset.setVisible(keyframed)
+        self.timing_label.setVisible(keyframed)
+        self.timing_combo.setVisible(keyframed)
         self.position_label.setVisible(keyframed)
         self.position_spin.setVisible(keyframed)
         self.graph.setVisible(keyframed)
@@ -475,6 +493,7 @@ class EffectLane(QFrame):
         enabled: bool | None = None,
         amount: float | None = None,
         option: str | None = None,
+        timing_basis: str | None = None,
     ) -> EffectTrack:
         self._track = EffectTrack(
             self._track.kind,
@@ -482,6 +501,7 @@ class EffectLane(QFrame):
             self._track.enabled if enabled is None else enabled,
             self._track.amount if amount is None else amount,
             self._track.option if option is None else option,
+            self._track.timing_basis if timing_basis is None else timing_basis,
         )
         return self._track
 
@@ -531,6 +551,8 @@ class EffectLane(QFrame):
         if self.mode_combo is not None:
             with QSignalBlocker(self.mode_combo):
                 self.mode_combo.setCurrentIndex(self.mode_combo.findData(self._track.option))
+        with QSignalBlocker(self.timing_combo):
+            self.timing_combo.setCurrentIndex(self.timing_combo.findData(self._track.timing_basis))
         with QSignalBlocker(self.preset):
             self.preset.setCurrentIndex(0)
         self.graph.set_keyframes(self._track.keyframes)
@@ -547,6 +569,12 @@ class EffectLane(QFrame):
             return
         self._replace_track(option=str(self.mode_combo.currentData()))
         self._sync_name_label()
+        self.track_committed.emit(self._track)
+
+    def _timing_changed(self) -> None:
+        if self.timing_combo.currentData() is None:
+            return
+        self._replace_track(timing_basis=str(self.timing_combo.currentData()))
         self.track_committed.emit(self._track)
 
     def _sync_name_label(self) -> None:
@@ -602,6 +630,9 @@ class EffectLane(QFrame):
         self.remove_button.setVisible(not narrow)
         self.more_button.setVisible(narrow)
         self.preset.setVisible(self._keyframed)
+        self.timing_label.setVisible(self._keyframed and not narrow)
+        self.timing_combo.setVisible(self._keyframed)
+        self.timing_combo.setFixedWidth(138 if narrow else 152)
         self.preset.setFixedWidth(112 if narrow else 126)
         self.position_label.setVisible(self._keyframed and not narrow)
         self.position_spin.setVisible(self._keyframed)

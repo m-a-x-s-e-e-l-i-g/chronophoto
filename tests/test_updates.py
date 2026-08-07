@@ -1,8 +1,22 @@
 from __future__ import annotations
 
+import tomllib
+from pathlib import Path
+
 import pytest
 
+from chronophoto import __version__
 from chronophoto.updates import evaluate_release, version_key
+
+
+def test_runtime_and_packaging_versions_match() -> None:
+    project_root = Path(__file__).parents[1]
+    with (project_root / "pyproject.toml").open("rb") as project_file:
+        project_version = tomllib.load(project_file)["project"]["version"]
+    installer = (project_root / "packaging/windows/chronophoto.iss").read_text(encoding="utf-8")
+
+    assert __version__ == project_version
+    assert f'#define MyAppVersion "{project_version}"' in installer
 
 
 def test_version_key_accepts_release_tags() -> None:

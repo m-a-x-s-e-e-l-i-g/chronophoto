@@ -58,8 +58,10 @@ from chronophoto.processing import (
     load_image_sequence,
     load_video_sequence,
     order_image_paths,
+    render_motion_trail_sequence,
     select_video_sequence,
     write_export_package,
+    write_motion_trail_video,
 )
 from chronophoto.processing.sources import VideoInfo, probe_video
 from chronophoto.ui.effects import EffectTimelinePanel
@@ -106,6 +108,7 @@ class RenderRequest:
     video_selection_key: tuple[object, ...] | None
     video_cache_key: tuple[object, ...] | None
     video_duration: float
+    video_frame_rate: float
     enabled_video_indices: tuple[int, ...] | None
     source_dimensions: tuple[int, int]
 
@@ -166,6 +169,8 @@ class ChronophotoWindow(QMainWindow):
         self.preview_frames: list[np.ndarray] = []
         self.preview_masks: list[np.ndarray] = []
         self.preview_labels: list[str] = []
+        self.preview_trail_frames: list[np.ndarray] = []
+        self.preview_trail_timestamps: list[float] = []
         self._preview_cache_key: tuple[object, ...] | None = None
         self._preview_cache_sequence: MediaSequence | None = None
         self._video_preview_cache_key: tuple[object, ...] | None = None
@@ -470,7 +475,12 @@ class ChronophotoWindow(QMainWindow):
         self.preview_mode_group = QButtonGroup(self)
         self.preview_mode_group.setExclusive(True)
         self.preview_mode_buttons: dict[str, QToolButton] = {}
-        for mode, label in (("source", "Source"), ("composite", "Composite"), ("mask", "Mask")):
+        for mode, label in (
+            ("source", "Source"),
+            ("composite", "Composite"),
+            ("trail", "Trail video"),
+            ("mask", "Mask"),
+        ):
             button = QToolButton()
             button.setText(label)
             button.setCheckable(True)
@@ -571,7 +581,12 @@ class ChronophotoWindow(QMainWindow):
         self.export_button = QPushButton("Export composite")
         self.export_button.setObjectName("primaryButton")
         self.export_button.clicked.connect(self.export_composite)
+        self.trail_video_button = QPushButton("Export trail video")
+        self.trail_video_button.setObjectName("quietButton")
+        self.trail_video_button.setAccessibleName("Export motion-trail video")
+        self.trail_video_button.clicked.connect(self.export_motion_video)
         actions.addStretch()
+        actions.addWidget(self.trail_video_button)
         actions.addWidget(self.export_button)
         layout.addLayout(actions)
         return workspace
@@ -660,6 +675,27 @@ class ChronophotoWindow(QMainWindow):
         self.pose_control.setObjectName("poseControl")
         self.pose_control.setProperty("allFramesActive", True)
         layout.addWidget(self.pose_control)
+
+        self.trail_duration = ScrollSafeSlider(Qt.Orientation.Horizontal)
+        self.trail_duration.setRange(0, 10_000)
+        self.trail_duration.setValue(1_000)
+        self.trail_duration.setSingleStep(100)
+        self.trail_duration.setPageStep(500)
+        self.trail_duration.setTracking(False)
+        self.trail_duration.setAccessibleName("Motion trail duration")
+        self.trail_duration.setAccessibleDescription(
+            "Choose how many seconds of earlier subject movement remain visible"
+        )
+        self.trail_duration_value = QLabel("1.0 s")
+        self.trail_duration_value.setObjectName("valueLabel")
+        self.trail_duration.valueChanged.connect(self._trail_duration_changed)
+        self.trail_duration_control = self._slider_control(
+            "TRAIL DURATION",
+            "How long earlier positions remain visible. Trail video always uses every frame.",
+            self.trail_duration,
+            self.trail_duration_value,
+        )
+        layout.addWidget(self.trail_duration_control)
 
         self.pose_count.setAccessibleDescription(
             "Choose any number of evenly spaced poses in the selected video range"
@@ -1031,6 +1067,8 @@ class ChronophotoWindow(QMainWindow):
         self.preview_frames = []
         self.preview_masks = []
         self.preview_labels = []
+        self.preview_trail_frames = []
+        self.preview_trail_timestamps = []
         self._preview_cache_key = None
         self._preview_cache_sequence = None
         self._video_preview_cache_key = None
@@ -1241,21 +1279,32 @@ class ChronophotoWindow(QMainWindow):
         duration = self.source.video_info.duration
         return duration * self.range_slider.low / 1000, duration * self.range_slider.high / 1000
 
-    def _render_request(self, max_dimension: int | None) -> RenderRequest:
+    def _render_request(
+        self,
+        max_dimension: int | None,
+        *,
+        motion_video: bool = False,
+    ) -> RenderRequest:
         if not self.source:
             raise ValueError("Choose a video or photo stack first")
         if self.source.kind == "video":
             start, end = self._video_range()
             paths = tuple(self.source.paths)
             assert self.source.video_info is not None
-            pose_count = None if self.all_frames.isChecked() else self.pose_count.value()
+            pose_count = (
+                None if motion_video or self.all_frames.isChecked() else self.pose_count.value()
+            )
             video_selection_key = (
                 str(paths[0]),
                 round(start, 4),
                 round(end, 4),
                 pose_count,
             )
-            enabled_indices = self._enabled_video_indices(pose_count, video_selection_key)
+            enabled_indices = (
+                None
+                if motion_video
+                else self._enabled_video_indices(pose_count, video_selection_key)
+            )
             if enabled_indices is not None and len(enabled_indices) < 2:
                 raise ValueError("Enable at least two video poses")
             try:
@@ -1272,6 +1321,7 @@ class ChronophotoWindow(QMainWindow):
                 max_dimension,
             )
             video_duration = self.source.video_info.duration
+            video_frame_rate = self.source.video_info.frame_rate
             source_dimensions = (
                 self.source.video_info.width,
                 self.source.video_info.height,
@@ -1284,6 +1334,7 @@ class ChronophotoWindow(QMainWindow):
             enabled_indices = None
             video_cache_key = None
             video_duration = 0.0
+            video_frame_rate = 0.0
             if len(paths) < 2:
                 raise ValueError("Enable at least two photographs")
             with Image.open(paths[0]) as image:
@@ -1309,6 +1360,7 @@ class ChronophotoWindow(QMainWindow):
             video_selection_key=video_selection_key,
             video_cache_key=video_cache_key,
             video_duration=video_duration,
+            video_frame_rate=video_frame_rate,
             enabled_video_indices=enabled_indices,
             source_dimensions=source_dimensions,
         )
@@ -1327,6 +1379,8 @@ class ChronophotoWindow(QMainWindow):
             self.status_text.setText("CHECK FRAMES")
             self.status_detail.setText(str(exc))
             return
+        render_trail = self._current_preview_mode() == "trail" and request.kind == "video"
+        trail_duration = self._trail_duration_seconds()
         cached_photo_sequence = (
             self._preview_cache_sequence
             if request.kind == "photos" and self._preview_cache_key == request.cache_key
@@ -1403,6 +1457,8 @@ class ChronophotoWindow(QMainWindow):
                 )
                 timeline_frames = [video_cache.frames[int(index)] for index in thumbnail_indices]
             labels = sequence.labels
+            trail_frames: list[np.ndarray] = []
+            trail_timestamps: list[float] = []
             if request.kind == "video":
                 assert video_cache is not None
                 if analysis_cache is None:
@@ -1446,7 +1502,8 @@ class ChronophotoWindow(QMainWindow):
                 )
                 selected_cache = analysis_cache.compose_cache.select(selected_source_indices)
                 compose_start = 70 if analysis_was_built else 40
-                compose_span = 30 if analysis_was_built else 60
+                compose_end = 75 if render_trail else 100
+                compose_span = max(0, compose_end - compose_start)
                 result, masks = compose_sequence(
                     frames,
                     request.settings,
@@ -1466,6 +1523,48 @@ class ChronophotoWindow(QMainWindow):
                     ),
                 )
                 aligned = frames
+                if render_trail:
+                    motion_sequence = select_video_sequence(
+                        video_cache,
+                        request.start,
+                        request.end,
+                        None,
+                    )
+                    if motion_sequence.timestamps is None or motion_sequence.source_indices is None:
+                        raise RuntimeError(
+                            "Selected trail frames have no timestamps or cache indices"
+                        )
+                    trail_source_indices = motion_sequence.source_indices
+                    motion_frames = [analysis_cache.frames[index] for index in trail_source_indices]
+                    motion_cache = analysis_cache.compose_cache.select(trail_source_indices)
+                    motion_timestamps = list(motion_sequence.timestamps)
+                    preview_indices = np.linspace(
+                        0,
+                        len(motion_frames) - 1,
+                        min(60, len(motion_frames)),
+                        dtype=int,
+                    ).tolist()
+                    preview_indices = list(dict.fromkeys(preview_indices))
+                    trail_timestamps = [motion_timestamps[index] for index in preview_indices]
+                    trail_frames = render_motion_trail_sequence(
+                        motion_frames,
+                        motion_timestamps,
+                        trail_duration,
+                        request.settings,
+                        motion_cache,
+                        effect_progress=self._normalized_effect_progress(
+                            motion_timestamps,
+                            len(motion_frames),
+                            request.start,
+                            request.end,
+                        ),
+                        effect_pixel_scale=self._effect_pixel_scale(
+                            motion_frames,
+                            request.source_dimensions,
+                        ),
+                        frame_indices=preview_indices,
+                        progress=lambda value, message: progress(75 + int(value * 0.25), message),
+                    )
             else:
                 frames = sequence.frames
                 aligned = align_sequence(
@@ -1505,6 +1604,8 @@ class ChronophotoWindow(QMainWindow):
                 "timeline_frames": timeline_frames,
                 "kind": request.kind,
                 "video_selection_key": request.video_selection_key,
+                "trail_frames": trail_frames,
+                "trail_timestamps": trail_timestamps,
             }
 
         if request.kind == "video" and cached_video_sequence is not None:
@@ -1522,6 +1623,8 @@ class ChronophotoWindow(QMainWindow):
         self.preview_masks = data["masks"]
         self.preview_frames = data["frames"]
         self.preview_labels = data["labels"]
+        self.preview_trail_frames = data["trail_frames"]
+        self.preview_trail_timestamps = data["trail_timestamps"]
         self._preview_cache_sequence = data["sequence"]
         self._preview_cache_key = data["cache_key"]
         if data["video_cache_sequence"] is not None:
@@ -1540,8 +1643,7 @@ class ChronophotoWindow(QMainWindow):
                 data["video_selection_key"],
             )
         pose_total = len(self.preview_frames)
-        self.pose_scrubber.setRange(0, max(0, pose_total - 1))
-        self.pose_scrubber.setValue(min(self.pose_scrubber.value(), max(0, pose_total - 1)))
+        self._sync_preview_navigation()
         source_size = data["source_size"]
         unit = "frames" if self.all_frames.isChecked() and data["kind"] == "video" else "poses"
         self.result_meta.setText(
@@ -1560,6 +1662,92 @@ class ChronophotoWindow(QMainWindow):
         else:
             detail = "Inspect Source or Mask, then export"
         self._finish_task("PREVIEW READY", detail)
+
+    @Slot()
+    def export_motion_video(self) -> None:
+        if (
+            not self.source
+            or self.source.kind != "video"
+            or not self.source.video_info
+            or self._thread
+        ):
+            return
+        self.preview_debounce.stop()
+        self._pending_preview = False
+        try:
+            request = self._render_request(None, motion_video=True)
+        except ValueError as exc:
+            self.status_text.setText("CHECK FRAMES")
+            self.status_detail.setText(str(exc))
+            return
+        last_dir = Path(str(self.settings_store.value("last_export_dir", str(Path.home()))))
+        suggested = last_dir / f"{request.paths[0].stem}-motion-trail.mp4"
+        path, selected_filter = QFileDialog.getSaveFileName(
+            self,
+            "Export motion-trail video",
+            str(suggested),
+            "MP4 video (*.mp4)",
+        )
+        if not path:
+            return
+        export_path = self._export_path_with_filter(Path(path), selected_filter)
+        self.settings_store.setValue("last_export_dir", str(export_path.parent))
+        trail_duration = self._trail_duration_seconds()
+
+        def task(progress: Callable[[int, str], None]):
+            sequence = load_video_sequence(
+                request.paths[0],
+                request.start,
+                request.end,
+                None,
+                progress=lambda value, message: progress(int(value * 0.25), message),
+            )
+            if sequence.timestamps is None:
+                raise RuntimeError("Selected video frames have no timestamps")
+            aligned = align_sequence(
+                sequence.frames,
+                request.alignment,
+                progress=lambda value, message: progress(25 + int(value * 0.10), message),
+            )
+            analysis = build_compose_cache(
+                aligned,
+                request.settings,
+                progress=lambda value, message: progress(35 + int(value * 0.25), message),
+            )
+            effect_progress = self._normalized_effect_progress(
+                sequence.timestamps,
+                len(aligned),
+                request.start,
+                request.end,
+            )
+            written = write_motion_trail_video(
+                export_path,
+                request.paths[0],
+                aligned,
+                sequence.timestamps,
+                trail_duration,
+                request.settings,
+                analysis,
+                start=request.start,
+                end=request.end,
+                frame_rate=request.video_frame_rate,
+                effect_progress=effect_progress,
+                effect_pixel_scale=1.0,
+                progress=lambda value, message: progress(60 + int(value * 0.40), message),
+            )
+            return written, len(aligned), aligned[-1]
+
+        self._start_task(task, self._video_export_finished, "Rendering motion-trail video")
+
+    @Slot(object)
+    def _video_export_finished(self, payload: object) -> None:
+        path, frame_count, last_frame = payload  # type: ignore[misc]
+        self._last_export_path = Path(path)
+        self.open_export_button.show()
+        self.result_meta.setText(
+            f"Motion trail · {last_frame.shape[1]} × {last_frame.shape[0]} · {frame_count} frames"
+        )
+        self._finish_task("VIDEO EXPORT COMPLETE", Path(path).name)
 
     @Slot()
     def export_composite(self) -> None:
@@ -1843,6 +2031,7 @@ class ChronophotoWindow(QMainWindow):
             self.photos_button,
             self.drop_surface,
             self.export_button,
+            self.trail_video_button,
             self.threshold,
             self.feather,
             self.background_mode,
@@ -1854,6 +2043,7 @@ class ChronophotoWindow(QMainWindow):
             self.move_down_button,
             self.reset_button,
             self.export_options_button,
+            self.trail_duration,
         ):
             control.setEnabled(
                 not busy
@@ -1865,6 +2055,8 @@ class ChronophotoWindow(QMainWindow):
         self.pose_count.setEnabled(is_video and not self.all_frames.isChecked())
         self.all_frames.setEnabled(is_video)
         self.range_slider.setEnabled(is_video)
+        self.trail_duration.setEnabled(is_video and not busy)
+        self.trail_video_button.setEnabled(is_video and not busy)
         self.frame_list.setEnabled(loaded)
         for checkbox in self.export_checks.values():
             checkbox.setEnabled(loaded and not busy)
@@ -1894,6 +2086,11 @@ class ChronophotoWindow(QMainWindow):
         self.smear_style.setEnabled(loaded)
         self.alignment_mode.setEnabled(loaded)
         is_video = loaded and bool(self.source and self.source.kind == "video")
+        self.preview_mode_buttons["trail"].setVisible(is_video)
+        self.trail_duration_control.setVisible(is_video)
+        self.trail_video_button.setVisible(is_video)
+        if not is_video and self._current_preview_mode() == "trail":
+            self.preview_mode_buttons["composite"].setChecked(True)
         self.pose_control.setVisible(is_video)
         self.pose_count.setEnabled(is_video and not self.all_frames.isChecked())
         self.all_frames.setEnabled(is_video)
@@ -1965,6 +2162,9 @@ class ChronophotoWindow(QMainWindow):
         self.start_time.setText(self._format_time(duration * low / 1000))
         self.end_time.setText(self._format_time(duration * high / 1000))
         self._update_pose_range()
+        self._update_trail_duration_range()
+        self.preview_trail_frames = []
+        self.preview_trail_timestamps = []
         self._preview_dirty = True
         self.status_text.setText("PREVIEW OUT OF DATE")
         self.status_detail.setText("Release the range handle to update")
@@ -2029,6 +2229,9 @@ class ChronophotoWindow(QMainWindow):
         self.background_effect_timeline.set_expanded(False)
         if self.source and self.source.kind == "video":
             self.range_slider.set_values(80, 850)
+            with QSignalBlocker(self.trail_duration):
+                self.trail_duration.setValue(min(1_000, self.trail_duration.maximum()))
+            self._update_trail_duration_label()
             self.alignment_mode.setCurrentIndex(self.alignment_mode.findData("off"))
         else:
             self.alignment_mode.setCurrentIndex(self.alignment_mode.findData("translation"))
@@ -2062,6 +2265,47 @@ class ChronophotoWindow(QMainWindow):
             frames[0].shape[0] / source_dimensions[1],
         )
 
+    def _trail_duration_seconds(self) -> float:
+        return self.trail_duration.value() / 1_000.0
+
+    @Slot(int)
+    def _trail_duration_changed(self, value: int) -> None:
+        del value
+        self._update_trail_duration_label()
+        self.preview_trail_frames = []
+        self.preview_trail_timestamps = []
+        if self.source and self.source.kind == "video" and self._current_preview_mode() == "trail":
+            self._schedule_preview()
+
+    def _update_trail_duration_label(self) -> None:
+        self.trail_duration_value.setText(f"{self._trail_duration_seconds():.1f} s")
+
+    def _update_trail_duration_range(self) -> None:
+        if not self.source or not self.source.video_info:
+            return
+        selected_duration = (
+            self.source.video_info.duration
+            * (self.range_slider.high - self.range_slider.low)
+            / 1_000
+        )
+        maximum = max(1, round(selected_duration * 1_000))
+        current = min(self.trail_duration.value(), maximum)
+        with QSignalBlocker(self.trail_duration):
+            self.trail_duration.setRange(0, maximum)
+            self.trail_duration.setValue(current)
+        self._update_trail_duration_label()
+
+    def _sync_preview_navigation(self) -> None:
+        frames = (
+            self.preview_trail_frames
+            if self._current_preview_mode() == "trail"
+            else self.preview_frames
+        )
+        maximum = max(0, len(frames) - 1)
+        with QSignalBlocker(self.pose_scrubber):
+            self.pose_scrubber.setRange(0, maximum)
+            self.pose_scrubber.setValue(min(self.pose_scrubber.value(), maximum))
+
     def _set_preview_mode(self, mode: str) -> None:
         button = self.preview_mode_buttons.get(mode)
         if button:
@@ -2069,7 +2313,18 @@ class ChronophotoWindow(QMainWindow):
         if mode == "composite":
             self.playback_timer.stop()
             self.play_button.setText("Play")
+        self._sync_preview_navigation()
         self._refresh_preview_canvas()
+        if (
+            mode == "trail"
+            and not self.preview_trail_frames
+            and self.source
+            and self.source.kind == "video"
+        ):
+            if self._thread:
+                self._pending_preview = True
+            else:
+                self.render_preview()
 
     def _current_preview_mode(self) -> str:
         for mode, button in self.preview_mode_buttons.items():
@@ -2079,7 +2334,7 @@ class ChronophotoWindow(QMainWindow):
 
     def _refresh_preview_canvas(self) -> None:
         mode = self._current_preview_mode()
-        pose_total = len(self.preview_frames)
+        pose_total = len(self.preview_trail_frames) if mode == "trail" else len(self.preview_frames)
         position = min(self.pose_scrubber.value(), max(0, pose_total - 1))
         self.pose_position.setText(f"{position + 1 if pose_total else 0} / {pose_total}")
         if mode == "composite" and self.preview_result is not None:
@@ -2090,6 +2345,19 @@ class ChronophotoWindow(QMainWindow):
                 self.preview_labels[position] if position < len(self.preview_labels) else "SOURCE"
             )
             self.preview_canvas.set_image(image_to_qimage(self.preview_frames[position]), label)
+        elif mode == "trail" and pose_total:
+            timestamp = (
+                self.preview_trail_timestamps[position]
+                if position < len(self.preview_trail_timestamps)
+                else 0.0
+            )
+            self.preview_canvas.set_image(
+                image_to_qimage(self.preview_trail_frames[position]),
+                (
+                    f"{'TRAIL OUTDATED' if self._preview_dirty else 'TRAIL'} · "
+                    f"{self._format_time(timestamp)} · {self._trail_duration_seconds():.1f} s"
+                ),
+            )
         elif mode == "mask" and pose_total and position < len(self.preview_masks):
             self.preview_canvas.set_image(
                 mask_overlay_to_qimage(self.preview_frames[position], self.preview_masks[position]),
@@ -2099,7 +2367,12 @@ class ChronophotoWindow(QMainWindow):
             self.preview_canvas.set_image(None, "WAITING FOR FOOTAGE")
 
     def _toggle_playback(self) -> None:
-        if not self.preview_frames:
+        active_frames = (
+            self.preview_trail_frames
+            if self._current_preview_mode() == "trail"
+            else self.preview_frames
+        )
+        if not active_frames:
             return
         if self._current_preview_mode() == "composite":
             self._set_preview_mode("source")
@@ -2107,14 +2380,27 @@ class ChronophotoWindow(QMainWindow):
             self.playback_timer.stop()
             self.play_button.setText("Play")
         else:
+            if self._current_preview_mode() == "trail" and len(self.preview_trail_timestamps) > 1:
+                deltas = np.diff(self.preview_trail_timestamps)
+                positive_deltas = deltas[deltas > 0]
+                if positive_deltas.size:
+                    interval = round(float(np.median(positive_deltas)) * 1_000)
+                    self.playback_timer.setInterval(max(16, min(500, interval)))
+            else:
+                self.playback_timer.setInterval(180)
             self.playback_timer.start()
             self.play_button.setText("Pause")
 
     def _advance_pose(self) -> None:
-        if not self.preview_frames:
+        frame_count = (
+            len(self.preview_trail_frames)
+            if self._current_preview_mode() == "trail"
+            else len(self.preview_frames)
+        )
+        if not frame_count:
             self.playback_timer.stop()
             return
-        self.pose_scrubber.setValue((self.pose_scrubber.value() + 1) % len(self.preview_frames))
+        self.pose_scrubber.setValue((self.pose_scrubber.value() + 1) % frame_count)
 
     def _open_export_folder(self) -> None:
         if self._last_export_path:
@@ -2149,6 +2435,8 @@ class ChronophotoWindow(QMainWindow):
             return path.with_suffix(".tif")
         if selected_filter.startswith("JPEG"):
             return path.with_suffix(".jpg")
+        if selected_filter.startswith("MP4"):
+            return path.with_suffix(".mp4")
         return path.with_suffix(".png")
 
     @staticmethod

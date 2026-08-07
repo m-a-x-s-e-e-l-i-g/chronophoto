@@ -42,6 +42,15 @@ def test_effect_track_interpolates_normalized_progress() -> None:
     assert track.value_at(2.0) == 0.0
 
 
+def test_effect_timing_defaults_to_full_movement_and_is_validated() -> None:
+    keyframes = (EffectKeyframe(0.0, 0.0), EffectKeyframe(1.0, 100.0))
+
+    assert EffectTrack("opacity", keyframes).timing_basis == "movement"
+    assert EffectTrack("opacity", keyframes, timing_basis="trail").timing_basis == "trail"
+    with pytest.raises(ValueError, match="unsupported effect timing"):
+        EffectTrack("opacity", keyframes, timing_basis="clip")
+
+
 def test_requested_presets_are_available_for_every_effect() -> None:
     for kind in EFFECT_KINDS:
         neutral = neutral_effect_track(kind)
@@ -188,6 +197,38 @@ def test_opacity_only_changes_the_subject_alpha() -> None:
     assert np.array_equal(effected, frame)
     assert effected_mask[30, 40] == pytest.approx(0.25)
     assert effected_mask[0, 0] == 0.0
+
+
+def test_trail_timed_effect_uses_the_window_relative_progress() -> None:
+    frame, mask = subject_fixture()
+    keyframes = (EffectKeyframe(0.0, 0.0), EffectKeyframe(1.0, 100.0))
+    track = EffectTrack(
+        "opacity",
+        keyframes,
+        timing_basis="trail",
+    )
+
+    _, movement_mask = apply_effect_tracks(frame, mask, 0.75, (track,))
+    _, trail_mask = apply_effect_tracks(
+        frame,
+        mask,
+        0.75,
+        (track,),
+        trail_progress=0.25,
+    )
+
+    assert movement_mask[30, 40] == pytest.approx(0.75)
+    assert trail_mask[30, 40] == pytest.approx(0.25)
+
+    movement_track = EffectTrack("opacity", keyframes)
+    _, mixed_mask = apply_effect_tracks(
+        frame,
+        mask,
+        0.75,
+        (movement_track, track),
+        trail_progress=0.25,
+    )
+    assert mixed_mask[30, 40] == pytest.approx(0.75 * 0.25)
 
 
 def test_saturation_blur_and_jpeg_quality_have_distinct_results() -> None:
