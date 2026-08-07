@@ -152,6 +152,24 @@ def test_photographic_smear_connects_adjacent_poses() -> None:
     assert not np.array_equal(blurred, solid)
 
 
+def test_still_photographic_smear_keeps_wide_pose_connections() -> None:
+    background = np.full((120, 240, 3), (18, 28, 42), dtype=np.uint8)
+    frames = [background.copy(), background.copy()]
+    masks = []
+    for frame, left, top in ((frames[0], 12, 12), (frames[1], 208, 88)):
+        cv2.rectangle(frame, (left, top), (left + 19, top + 19), (225, 75, 30), -1)
+        mask = np.max(np.abs(frame.astype(np.int16) - background.astype(np.int16)), axis=2) > 0
+        masks.append(mask.astype(np.uint8) * 255)
+
+    result, _ = compose_sequence(
+        frames,
+        ComposeSettings(smear_style="photographic"),
+        cache=ComposeCache(background, masks),
+    )
+
+    assert not np.array_equal(result[60, 120], background[60, 120])
+
+
 def test_primary_motion_tracking_rejects_a_persistent_background_component() -> None:
     masks = []
     for index in range(5):

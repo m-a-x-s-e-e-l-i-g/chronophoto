@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "chronophoto"
-version = "0.2.0"
-description = "Turn motion footage into layered action photographs."
+version = "0.3.0"
+description = "Turn action footage into motion photographs and trail videos."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { file = "LICENSE" }

@@ -48,6 +48,8 @@ def test_terminal_font_is_applied_to_the_stylesheet() -> None:
     stylesheet = application_stylesheet("Example Mono")
 
     assert 'font-family: "Example Mono"' in stylesheet
+    assert 'QLabel#updateStatus[state="available"] { color: #ff6b6b' in stylesheet
+    assert 'QLabel#updateStatus[state="current"] { color: #70d98b' in stylesheet
     assert "__APP_MONO_FONT__" not in stylesheet
     assert "__CHECKMARK_ICON__" not in stylesheet
     assert "check.svg" in stylesheet
@@ -84,9 +86,11 @@ def test_header_shows_version_github_and_update_state() -> None:
     assert window.github_button.text() == "GITHUB"
     window._apply_update_result(UpdateResult("0.2.0", "https://example.com/release", True))
     assert window.update_status.text() == "UPDATE v0.2.0 AVAILABLE"
+    assert window.update_status.property("state") == "available"
     assert window._github_target_url == "https://example.com/release"
     window._apply_update_result(UpdateResult(__version__, "https://example.com/release", False))
     assert window.update_status.text() == "UP TO DATE"
+    assert window.update_status.property("state") == "current"
     assert window._github_target_url == GITHUB_REPOSITORY_URL
 
     window.close()
@@ -219,7 +223,16 @@ def test_trail_effect_timeline_adds_independent_neutral_tracks() -> None:
         "halftone",
     ]
     assert [track.value_at(0.5) for track in tracks] == [100, 100, 100, 0, 100, 0, 0, 0]
-    assert window._settings_snapshot().trail_effect_tracks == tracks
+    assert {track.timing_basis for track in tracks} == {"movement"}
+    opacity_lane = window.effect_timeline._lanes[0]
+    assert opacity_lane.timing_combo.accessibleName() == "Effect timing"
+    assert [
+        opacity_lane.timing_combo.itemData(index)
+        for index in range(opacity_lane.timing_combo.count())
+    ] == ["movement", "trail"]
+    opacity_lane.timing_combo.setCurrentIndex(opacity_lane.timing_combo.findData("trail"))
+    assert opacity_lane.track.timing_basis == "trail"
+    assert window._settings_snapshot().trail_effect_tracks == window.effect_timeline.tracks()
     window.close()
 
 
@@ -238,6 +251,7 @@ def test_background_effects_use_constant_values_and_a_separate_scope() -> None:
     assert lane.graph.isHidden()
     assert lane.preset.isHidden()
     assert lane.position_spin.isHidden()
+    assert lane.timing_combo.isHidden()
     assert lane.value_spin.isVisibleTo(lane)
     lane.value_spin.setValue(64)
     lane._constant_value_committed()
@@ -314,6 +328,117 @@ def test_export_outputs_allow_any_layer_combination() -> None:
     assert window._export_selections() == ()
     assert not window.export_button.isEnabled()
     assert window.export_options_button.text() == "OUTPUTS · NONE ▾"
+    window.close()
+
+
+def test_motion_trail_controls_are_video_only_and_use_seconds() -> None:
+    _app = QApplication.instance() or QApplication([])
+    window = ChronophotoWindow()
+    path = Path("clip.mp4")
+    window.source = SourceState("video", [path], VideoInfo(path, 10.0, 640, 480, 30.0, 300))
+    window._set_loaded_state(True)
+    window.range_slider.set_values(200, 500)
+
+    assert not window.preview_mode_buttons["trail"].isHidden()
+    assert not window.trail_duration_control.isHidden()
+    assert not window.trail_video_button.isHidden()
+    assert window.trail_duration.maximum() == 3_000
+    window.trail_duration.setValue(1_400)
+    assert window.trail_duration_value.text() == "1.4 s"
+
+    window.source = SourceState("photos", [Path("one.png"), Path("two.png")])
+    window._set_loaded_state(True)
+    assert window.preview_mode_buttons["trail"].isHidden()
+    assert window.trail_duration_control.isHidden()
+    assert window.trail_video_button.isHidden()
+    window.close()
+
+
+def test_trail_preview_mode_uses_rendered_video_frames() -> None:
+    _app = QApplication.instance() or QApplication([])
+    window = ChronophotoWindow()
+    path = Path("clip.mp4")
+    window.source = SourceState("video", [path], VideoInfo(path, 2.0, 40, 24, 4.0, 8))
+    window._set_loaded_state(True)
+    window.preview_frames = [np.zeros((24, 40, 3), dtype=np.uint8) for _ in range(3)]
+    window.preview_trail_frames = [
+        np.full((24, 40, 3), index * 40, dtype=np.uint8) for index in range(5)
+    ]
+    window.preview_trail_timestamps = [0.0, 0.25, 0.5, 0.75, 1.0]
+
+    window._set_preview_mode("trail")
+    window.pose_scrubber.setValue(3)
+
+    assert window.pose_scrubber.maximum() == 4
+    assert window.preview_canvas._status.startswith("TRAIL · 00:00.75")
+    assert window.preview_canvas._image is not None
+    assert window.preview_canvas._image.pixelColor(0, 0).red() == 120
+    window.close()
+
+
+def test_motion_video_export_uses_every_frame_and_selected_duration(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _app = QApplication.instance() or QApplication([])
+    window = ChronophotoWindow()
+    path = Path("clip.mp4")
+    window.source = SourceState("video", [path], VideoInfo(path, 2.0, 48, 32, 4.0, 8))
+    window._set_loaded_state(True)
+    window.all_frames.setChecked(False)
+    window.pose_count.setValue(2)
+    window.trail_duration.setValue(750)
+    frames: list[np.ndarray] = []
+    for index in range(8):
+        frame = np.full((32, 48, 3), (20, 40, 80), dtype=np.uint8)
+        frame[10:24, 2 + index * 5 : 10 + index * 5] = (220, 60, 30)
+        frames.append(frame)
+    sequence = MediaSequence(
+        frames,
+        [f"00:00.{index}" for index in range(8)],
+        (48, 32),
+        [index / 4 for index in range(8)],
+    )
+    pose_counts: list[int | None] = []
+
+    def load_sequence(*args, **kwargs):  # type: ignore[no-untyped-def]
+        del kwargs
+        pose_counts.append(args[3])
+        return sequence
+
+    monkeypatch.setattr("chronophoto.ui.window.load_video_sequence", load_sequence)
+    output = tmp_path / "trail.mp4"
+    monkeypatch.setattr(
+        "chronophoto.ui.window.QFileDialog.getSaveFileName",
+        lambda *a, **k: (str(output), "MP4 video (*.mp4)"),
+    )
+    exported: dict[str, object] = {}
+
+    def write_video(output_path, source_path, render_frames, timestamps, duration, *args, **kwargs):  # type: ignore[no-untyped-def]
+        del args, kwargs
+        exported.update(
+            output=Path(output_path),
+            source=Path(source_path),
+            frame_count=len(render_frames),
+            timestamps=list(timestamps),
+            duration=duration,
+        )
+        return Path(output_path)
+
+    monkeypatch.setattr("chronophoto.ui.window.write_motion_trail_video", write_video)
+
+    def run_now(task, on_finished, detail):  # type: ignore[no-untyped-def]
+        del detail
+        on_finished(task(lambda value, message: None))
+
+    monkeypatch.setattr(window, "_start_task", run_now)
+    window.export_motion_video()
+
+    assert pose_counts == [None]
+    assert exported["output"] == output
+    assert exported["source"] == path
+    assert exported["frame_count"] == 8
+    assert exported["duration"] == pytest.approx(0.75)
+    assert window.status_text.text() == "VIDEO EXPORT COMPLETE"
     window.close()
 
 
@@ -925,3 +1050,4 @@ def test_export_filter_adds_the_matching_extension() -> None:
     assert ChronophotoWindow._export_path_with_filter(base, "PNG image (*.png)").suffix == ".png"
     assert ChronophotoWindow._export_path_with_filter(base, "TIFF image (*.tif)").suffix == ".tif"
     assert ChronophotoWindow._export_path_with_filter(base, "JPEG image (*.jpg)").suffix == ".jpg"
+    assert ChronophotoWindow._export_path_with_filter(base, "MP4 video (*.mp4)").suffix == ".mp4"

@@ -13,6 +13,7 @@ from chronophoto.processing.effects import (
     apply_background_effect_tracks,
     apply_effect_tracks,
     blend_mode_rgb,
+    effect_track_progress,
 )
 
 ImageArray = NDArray[np.uint8]
@@ -236,6 +237,10 @@ def _track_score(track: Sequence[_MaskComponent]) -> tuple[float, float]:
     return span * span / max(distance, 1.0), span
 
 
+def _maximum_tracking_step(mask_shape: tuple[int, int]) -> float:
+    return max(40.0, math.hypot(*mask_shape) * 0.06)
+
+
 def _isolate_primary_motion(
     masks: Sequence[NDArray[np.float32]],
 ) -> list[NDArray[np.float32]]:
@@ -248,7 +253,7 @@ def _isolate_primary_motion(
         return list(masks)
 
     diagonal = math.hypot(*masks[0].shape)
-    maximum_step = max(40.0, diagonal * 0.06)
+    maximum_step = _maximum_tracking_step(masks[0].shape)
     tracks: list[list[_MaskComponent]] = []
     for start in components[0]:
         track = [start]
@@ -306,6 +311,7 @@ def _blend_pose(
     mask: NDArray[np.float32],
     blend_tracks: Sequence[EffectTrack] = (),
     effect_progress: float = 0.0,
+    trail_progress: float | None = None,
 ) -> NDArray[np.float32]:
     points = cv2.findNonZero((mask > 0.001).astype(np.uint8))
     if points is None:
@@ -320,6 +326,7 @@ def _blend_pose(
         alpha,
         blend_tracks,
         effect_progress,
+        trail_progress,
         origin=(x, y),
     )
     return result
@@ -331,6 +338,7 @@ def _blend_region(
     alpha: NDArray[np.float32],
     blend_tracks: Sequence[EffectTrack],
     effect_progress: float,
+    trail_progress: float | None = None,
     *,
     origin: tuple[int, int] = (0, 0),
 ) -> NDArray[np.float32]:
@@ -343,7 +351,9 @@ def _blend_region(
     for track in blend_tracks:
         if not track.enabled or track.kind != "blend_mode":
             continue
-        strength = track.value_at(effect_progress) / 100.0
+        strength = (
+            track.value_at(effect_track_progress(track, effect_progress, trail_progress)) / 100.0
+        )
         if strength <= 0.00001 or track.option == "normal":
             continue
         mode_backdrop = composite if stacked_mode else target
@@ -416,14 +426,23 @@ def _swept_pair(
     second_frame: ImageArray,
     first_mask: NDArray[np.float32],
     second_mask: NDArray[np.float32],
+    maximum_distance: float | None = None,
+    first_tracking_mask: NDArray[np.float32] | None = None,
+    second_tracking_mask: NDArray[np.float32] | None = None,
 ) -> tuple[NDArray[np.float32], NDArray[np.float32]] | None:
-    first_center = _mask_centroid(first_mask)
-    second_center = _mask_centroid(second_mask)
+    first_center = _mask_centroid(
+        first_mask if first_tracking_mask is None else first_tracking_mask
+    )
+    second_center = _mask_centroid(
+        second_mask if second_tracking_mask is None else second_tracking_mask
+    )
     if first_center is None or second_center is None:
         return None
     dx = second_center[0] - first_center[0]
     dy = second_center[1] - first_center[1]
     distance = math.hypot(dx, dy)
+    if maximum_distance is not None and distance > maximum_distance:
+        return None
     step_spacing = max(3.0, min(first_mask.shape) * 0.012)
     intermediate_count = max(6, min(18, math.ceil(distance / step_spacing)))
     positions = np.linspace(0.0, 1.0, intermediate_count + 2, dtype=np.float32)
@@ -464,6 +483,20 @@ def _swept_pair(
     return color, alpha
 
 
+def _interpolated_optional_progress(
+    positions: Sequence[float | None],
+    index: int,
+    amount: float,
+) -> float | None:
+    if not positions:
+        return None
+    first = positions[index]
+    second = positions[index + 1]
+    if first is None or second is None:
+        return None
+    return first + amount * (second - first)
+
+
 def _apply_motion_ribbon(
     background: ImageArray,
     frames: Sequence[ImageArray],
@@ -471,6 +504,9 @@ def _apply_motion_ribbon(
     progress: ProgressCallback | None,
     blend_tracks: Sequence[EffectTrack] = (),
     effect_progress: Sequence[float] = (),
+    trail_progress: Sequence[float | None] = (),
+    tracking_masks: Sequence[NDArray[np.float32]] = (),
+    maximum_pair_distance: float | None = None,
 ) -> NDArray[np.float32]:
     """Build pairwise silhouette connectors underneath the original poses."""
 
@@ -479,9 +515,10 @@ def _apply_motion_ribbon(
     weight_sum = np.zeros(result.shape[:2], dtype=np.float32)
     alpha_union = np.zeros(result.shape[:2], dtype=np.float32)
     pair_total = max(1, len(frames) - 1)
+    geometry_masks = tracking_masks or masks
 
     for index in range(len(frames) - 1):
-        bounds = _pair_bounds(masks[index], masks[index + 1])
+        bounds = _pair_bounds(geometry_masks[index], geometry_masks[index + 1])
         if bounds is not None:
             left, top, right, bottom = bounds
             pair = _swept_pair(
@@ -489,6 +526,9 @@ def _apply_motion_ribbon(
                 frames[index + 1][top:bottom, left:right],
                 masks[index][top:bottom, left:right],
                 masks[index + 1][top:bottom, left:right],
+                maximum_pair_distance,
+                geometry_masks[index][top:bottom, left:right],
+                geometry_masks[index + 1][top:bottom, left:right],
             )
             if pair is not None:
                 pair_color, pair_alpha = pair
@@ -500,6 +540,9 @@ def _apply_motion_ribbon(
                         if effect_progress
                         else (index + 0.5) / max(1, len(frames) - 1)
                     )
+                    pair_trail_progress = _interpolated_optional_progress(
+                        trail_progress, index, 0.5
+                    )
                     target = result[top:bottom, left:right]
                     target[:] = _blend_region(
                         target,
@@ -507,6 +550,7 @@ def _apply_motion_ribbon(
                         ribbon_alpha,
                         blend_tracks,
                         pair_progress,
+                        pair_trail_progress,
                         origin=(left, top),
                     )
                 else:
@@ -536,13 +580,17 @@ def _apply_dense_clone_trail(
     progress: ProgressCallback | None,
     blend_tracks: Sequence[EffectTrack] = (),
     effect_progress: Sequence[float] = (),
+    trail_progress: Sequence[float | None] = (),
     analysis_background: ImageArray | None = None,
+    tracking_masks: Sequence[NDArray[np.float32]] = (),
+    maximum_pair_distance: float | None = None,
 ) -> NDArray[np.float32]:
     """Fill motion with overlapping photographic copies at pixel-spaced positions."""
 
     result = background.astype(np.float32)
     pair_total = max(1, len(frames) - 1)
     newest_on_top = overlap == "newest"
+    geometry_masks = tracking_masks or masks
 
     if not newest_on_top:
         result = _blend_pose(
@@ -551,6 +599,7 @@ def _apply_dense_clone_trail(
             masks[-1],
             blend_tracks,
             effect_progress[-1] if effect_progress else 1.0,
+            trail_progress[-1] if trail_progress else None,
         )
 
     pair_indices = range(len(frames) - 1)
@@ -558,18 +607,20 @@ def _apply_dense_clone_trail(
         pair_indices = range(len(frames) - 2, -1, -1)
 
     for completed, index in enumerate(pair_indices, start=1):
-        bounds = _pair_bounds(masks[index], masks[index + 1])
+        bounds = _pair_bounds(geometry_masks[index], geometry_masks[index + 1])
         if bounds is not None:
             left, top, right, bottom = bounds
             first_frame = frames[index][top:bottom, left:right].astype(np.float32)
             second_frame = frames[index + 1][top:bottom, left:right].astype(np.float32)
             first_mask = masks[index][top:bottom, left:right]
             second_mask = masks[index + 1][top:bottom, left:right]
-            first_center = _mask_centroid(first_mask)
-            second_center = _mask_centroid(second_mask)
+            first_center = _mask_centroid(geometry_masks[index][top:bottom, left:right])
+            second_center = _mask_centroid(geometry_masks[index + 1][top:bottom, left:right])
             if first_center is not None and second_center is not None:
                 dx = second_center[0] - first_center[0]
                 dy = second_center[1] - first_center[1]
+                if maximum_pair_distance is not None and math.hypot(dx, dy) > maximum_pair_distance:
+                    continue
                 step_count = _dense_clone_step_count(dx, dy)
                 steps = range(step_count)
                 if not newest_on_top:
@@ -601,12 +652,16 @@ def _apply_dense_clone_trail(
                             if effect_progress
                             else (index + position) / max(1, len(frames) - 1)
                         )
+                        pair_trail_progress = _interpolated_optional_progress(
+                            trail_progress, index, position
+                        )
                         target[:] = _blend_region(
                             target,
                             source_rgb,
                             alpha,
                             blend_tracks,
                             pair_progress,
+                            pair_trail_progress,
                             origin=(left, top),
                         )
                     else:
@@ -622,6 +677,7 @@ def _apply_dense_clone_trail(
             masks[-1],
             blend_tracks,
             effect_progress[-1] if effect_progress else 1.0,
+            trail_progress[-1] if trail_progress else None,
         )
     return result
 
@@ -634,7 +690,9 @@ def compose_sequence(
     return_masks: bool = True,
     cache: ComposeCache | None = None,
     effect_progress: Sequence[float] | None = None,
+    trail_progress: Sequence[float] | None = None,
     effect_pixel_scale: float = 1.0,
+    frame_contiguous: bool = False,
 ) -> tuple[ImageArray, list[NDArray[np.float32]]]:
     """Composite a chronological sequence and return the result plus pose masks."""
 
@@ -656,6 +714,21 @@ def compose_sequence(
             for left, right in zip(progress_positions, progress_positions[1:], strict=False)
         ):
             raise ValueError("Effect progress values must be chronological")
+    if trail_progress is None:
+        trail_positions: list[float | None] = [None] * len(source_frames)
+    else:
+        trail_positions = [float(position) for position in trail_progress]
+        if len(trail_positions) != len(source_frames):
+            raise ValueError("Trail progress must match the selected frames")
+        if any(
+            not math.isfinite(position) or not 0.0 <= position <= 1.0
+            for position in trail_positions
+        ):
+            raise ValueError("Trail progress values must be between 0 and 1")
+        if any(
+            left > right for left, right in zip(trail_positions, trail_positions[1:], strict=False)
+        ):
+            raise ValueError("Trail progress values must be chronological")
     if not math.isfinite(effect_pixel_scale) or effect_pixel_scale <= 0.0:
         raise ValueError("effect_pixel_scale must be positive")
     if cache is not None:
@@ -738,8 +811,8 @@ def compose_sequence(
     effected_masks: list[NDArray[np.float32]] = []
     if pixel_effects:
         effect_total = len(source_frames)
-        for index, (frame, mask, position) in enumerate(
-            zip(source_frames, masks, progress_positions, strict=True)
+        for index, (frame, mask, position, trail_position) in enumerate(
+            zip(source_frames, masks, progress_positions, trail_positions, strict=True)
         ):
             effected_frame, effected_mask = apply_effect_tracks(
                 frame,
@@ -747,6 +820,7 @@ def compose_sequence(
                 position,
                 pixel_effects,
                 pixel_scale=effect_pixel_scale,
+                trail_progress=trail_position,
             )
             effected_frames.append(effected_frame)
             effected_masks.append(effected_mask)
@@ -755,6 +829,9 @@ def compose_sequence(
         effected_frames = source_frames
         effected_masks = masks
 
+    maximum_pair_distance = (
+        _maximum_tracking_step(effected_masks[0].shape) if frame_contiguous else None
+    )
     if smear_enabled:
         if settings.smear_style == "dense_clones":
             _notify(progress, 60, "Filling motion with pixel-spaced clones")
@@ -766,7 +843,10 @@ def compose_sequence(
                 progress,
                 blend_effects,
                 progress_positions,
+                trail_positions,
                 background,
+                masks,
+                maximum_pair_distance,
             )
         else:
             _notify(progress, 60, "Building silhouette ribbon")
@@ -777,6 +857,9 @@ def compose_sequence(
                 progress,
                 blend_effects,
                 progress_positions,
+                trail_positions,
+                masks,
+                maximum_pair_distance,
             )
     else:
         result = render_background.astype(np.float32)
@@ -792,6 +875,7 @@ def compose_sequence(
             effected_masks[index],
             blend_effects,
             progress_positions[index],
+            trail_positions[index],
         )
         value = 82 + int(((position + 1) / len(pose_order)) * 16)
         message = "Compositing sharp endpoints" if smear_enabled else "Compositing sharp poses"

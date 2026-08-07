@@ -4,10 +4,10 @@
 
 <h1 align="center">Chronophoto</h1>
 
-<p align="center"><strong>Motion, held still.</strong></p>
+<p align="center"><strong>Motion, held still—or carried through time.</strong></p>
 
 <p align="center">
-  Turn a short action video into one layered motion photograph.<br>
+  Turn action footage into layered motion photographs and moving trail videos.<br>
   Video-first. Local processing. Windows, macOS, and Linux.
 </p>
 
@@ -17,16 +17,30 @@
   </a>
 </p>
 
-![A finished Chronophoto motion composite showing every stage of a jump](docs/images/chronophoto-result.png)
+<p align="center">
+  <a href="docs/videos/motion-trail-bridge-jump.mp4?raw=1">
+    <img src="docs/images/motion-trail-video-preview.jpg" alt="Five moments from a motion-trail video of a bridge jump, showing the trail growing behind the subject">
+  </a>
+</p>
 
-## One movement. One photograph.
+<p align="center">
+  <strong>Motion-trail video · 0.7 second trail</strong><br>
+  <a href="docs/videos/motion-trail-bridge-jump.mp4?raw=1">Watch the sample MP4 with audio</a>
+</p>
 
-Chronophoto takes the useful moment from an action video and places its frames
-into a single clean image. A jump becomes an arc. A trick shows its full path.
-A dance move becomes a readable sequence.
+## One movement. Two primary outputs.
 
-It is made for parkour, skateboarding, BMX, dance, climbing, athletics, and
-any movement that deserves more than one frozen instant.
+Chronophoto is a local desktop tool for action photographers and movement
+artists. Give it a short video, isolate the useful moment, and choose how time
+should appear:
+
+- **Motion-trail video** — the subject moves through the frame while a
+  configurable amount of recent movement follows behind.
+- **Motion photograph** — the full action becomes one layered still image, with
+  distinct poses or a continuous smear.
+
+A jump becomes an arc. A trick keeps its direction and timing. A dance move can
+become a photograph, an animation, or a set of editable layers.
 
 > Your footage stays on your computer. There is no upload and no cloud render.
 
@@ -34,120 +48,138 @@ any movement that deserves more than one frozen instant.
 
 ### 1. Bring in the action
 
-Drop a video anywhere in the window. You can also use an ordered photo stack
-when the action was shot as still photographs.
+Drop a video anywhere in the window. An ordered photo stack is also supported
+when the action was captured as still photographs.
 
 ### 2. Frame the movement
 
-Choose the in and out points around the action. Chronophoto includes every
-selected video frame by default, or you can choose a smaller number of poses.
-Disable individual frames when one does not belong in the final sequence.
+Choose the in and out points around the action. Chronophoto builds a clean plate
+and motion masks locally, then keeps them cached while you refine the result.
 
-### 3. Export the photograph
+### 3. Choose how time should look
 
-Inspect the composite, make a small mask adjustment only when it needs one,
-then export a full-resolution PNG, TIFF, or JPEG.
+- Open **Trail video**, choose a duration in seconds, press **Play**, and export
+  a full-resolution H.264 MP4 with the selected source audio.
+- Open **Composite**, choose every frame or a smaller pose count, and export a
+  PNG, TIFF, JPEG, or editable layer package.
 
-![Chronophoto workspace showing a completed jump sequence](docs/images/chronophoto-workspace.png)
+![Chronophoto workspace showing the Trail video preview and a 0.7 second duration](docs/images/motion-trail-ui.png)
 
-*The main workspace keeps the source frames, composite, timeline, and export
-action in one view.*
+*Source, still composite, trail video, mask inspection, timing, effects, and
+both export actions stay in one workspace.*
 
-## Try it with sample footage
+## Try the complete example
 
-Do not have a suitable clip ready? Download the included
-[sample video](sample/sample-01.mp4?raw=1) (about 46 MB). It is a 12-second
-vertical action clip that you can use to explore Chronophoto without preparing
-your own footage first.
+Want to reproduce the result above?
 
-1. Download `sample-01.mp4`.
-2. Drop it anywhere in the Chronophoto window.
-3. Choose a short section with the in and out handles.
-4. Leave **Use every selected frame** enabled, inspect the composite, and then
-   experiment with the mask and smear controls.
+1. Download the included 12-second
+   [bridge-jump source video](sample/sample-01.mp4?raw=1) (about 46 MB).
+2. Drop it into Chronophoto.
+3. Select approximately `00:04.35` to `00:06.65`.
+4. Open **Trail video** and set **Trail duration** to `0.7 s`.
+5. Press **Play**, then choose **Export trail video**.
 
-## What you can do
+Or [watch the finished sample directly](docs/videos/motion-trail-bridge-jump.mp4?raw=1)
+(about 150 KB).
 
-- Open a short video or an ordered stack of photographs.
-- Drop footage anywhere in the application window.
-- Include every selected frame, or choose any pose count with the slider.
-- See the nearest source frame while moving the in and out handles.
-- Turn individual poses on or off and reorder photographs.
-- Switch between **Source**, **Composite**, and **Mask** views.
-- Fine-tune mask sensitivity, edge feathering, clean plate, and overlap order.
-- Connect poses with **Photographic stretch** or **Dense cloned copies**, or
-  leave smear appearance set to **None** for distinct poses.
-- Pinch or two-finger scroll to zoom around the pointer, then drag to pan.
-- Apply opacity, Photoshop-style blend modes, saturation, blur, JPEG,
-  stippling, dithering, and halftone independently to the trail or background.
-- Export a full-resolution image or a package of separate background and pose layers.
-- See whether the installed version is current or a new GitHub release exists.
+## Main features
 
-## Shape the trail and background independently
+### Motion-trail video
 
-The workspace separates effects into two clear scopes:
+- Adjustable trail duration from the current subject only to the complete
+  selected range.
+- Causal rendering: previous positions can remain visible, but future positions
+  never appear early.
+- Smooth output from every source frame, independent of the still-image pose
+  count.
+- Full-resolution H.264 MP4 export with source timing, dimensions, and the
+  selected audio re-encoded to AAC.
+- Animated in-app preview, export progress, cancellation, and safe cleanup of
+  incomplete files.
 
-- **Trail effects** follow the detected subject, sharp poses, photographic
-  stretch, and dense cloned copies. Every lane has its own motion keyframes.
-- **Background effects** process only the clean plate behind the poses. Because
-  the clean plate is a single layer rather than a sequence, these lanes use one
-  constant value instead of pretend timeline keyframes.
+### Motion photographs and editable layers
 
-The two editors work like an accordion, keeping one expanded at a time so the
-photograph remains the largest part of the workspace. Their stacks are fully
-independent and changing either scope reuses the existing frame and mask cache.
+- Every selected frame or any smaller number of evenly spaced poses.
+- Distinct poses, **Photographic stretch**, or **Dense cloned copies**.
+- Newest- or oldest-pose overlap order.
+- Full-resolution PNG, TIFF, and JPEG export.
+- Finished composite, combined transparent poses, individual pose PNGs, and a
+  clean background layer in any combination.
 
-Start with `0 → 100 → 0`, `0 → 100`, or `100 → 0`, then drag the keyframes or
-enter exact position and value percentages. Effect positions use normalized
-motion progress, so the curve survives changes to the in/out range, pose count,
-disabled frames, and overlap order.
+### Creative control
 
-- **Opacity** fades copies in and out.
-- **Blend mode** mixes each pose with the composite beneath it. Choose from 27
-  familiar modes including Multiply, Screen, Overlay, Soft Light, Difference,
-  Hue, Color, and Luminosity, then keyframe the strength from Normal to the
-  selected mode. Add Blend Mode repeatedly to build an order-dependent stack;
-  each lane receives the composited result of the lane beneath it.
-- **Saturation** moves between grayscale and the original colour.
-- **Blur** uses a configurable maximum radius in output pixels.
-- **JPEG quality** runs from visibly damaged at 0% to clean at 100%.
-- **Stippling, dithering, and halftone** each have independent intensity curves
-  and pattern-size controls.
+- Separate effect stacks for the detected subject/trail and the clean plate.
+- Keyframed opacity, 27 blend modes, saturation, blur, JPEG damage, stippling,
+  dithering, and halftone.
+- Mask sensitivity, edge feathering, clean-plate selection, and camera
+  translation alignment.
+- Source, composite, trail-video, and mask views with pointer-centred zoom and
+  drag-to-pan.
 
-Drag lanes to change processing order, or bypass one temporarily without losing
-its settings. Background opacity fades a processed layer back toward the
-untouched clean plate; background blend modes behave like a duplicate clean
-plate layer blended over its original.
+### Local desktop workflow
 
-![Chronophoto with separate trail and background effect editors](docs/images/chronophoto-effect-timeline.png)
+- No upload, account, cloud render, or external FFmpeg installation.
+- Video and mask caching for fast in/out, pose, and effect adjustments.
+- Windows, macOS, and Linux release builds.
+- Automatic release checks without sending source footage anywhere.
 
-*Trail lanes stay aligned with motion progress; background lanes use one exact
-value. The editors collapse independently so the photograph remains the main
-workspace.*
+## Motion-trail video
 
-## Export a finished image or editable layers
+For each output timestamp, Chronophoto combines the current subject with only
+the subject positions inside the chosen amount of recent history. When a
+position becomes older than the trail duration, it disappears. The trail grows
+naturally at the start and the video ends at the selected out point without an
+artificial tail-out.
 
-The default **Export composite** action still writes one full-resolution PNG,
-TIFF, or JPEG. Open **Outputs** when you want reusable parts and select any
-combination of:
+The same mask, overlap, smear, trail-effect, and background-effect settings used
+for the still composite also shape the video. Preview playback is sampled to
+stay responsive; the final export always processes every source frame.
+
+## Motion photograph and editable layers
+
+![A finished Chronophoto motion composite showing every stage of a jump](docs/images/chronophoto-result.png)
+
+The still workflow places the useful stages of an action into one clean image.
+Use every frame for a dense motion study, reduce the pose count for clarity, or
+disable an individual pose that does not belong.
+
+The default **Export composite** action writes one full-resolution PNG, TIFF, or
+JPEG. Open **Outputs** to export any combination of:
 
 - **Finished composite** — the complete Chronophoto image.
 - **Poses · combined transparent PNG** — every masked pose on one alpha layer.
 - **Poses · separate transparent PNGs** — one numbered PNG per masked pose.
 - **Background only** — the processed clean plate without poses.
 
-Single combined-pose and background outputs save directly as PNG files.
 Combinations and separate-pose batches are collected in a safely named
-`-chronophoto-layers` folder, so individual poses never scatter through an
-existing folder or overwrite an earlier package. Transparent pose files retain opacity,
-saturation, blur, JPEG, stippling, dithering, and halftone effects. Blend modes
-remain in the finished composite because a flat transparent PNG has no backdrop
-to blend with.
+`-chronophoto-layers` folder. Transparent pose files retain pixel effects;
+blend modes remain in the finished composite because a flat transparent image
+has no backdrop to blend with.
 
 ![Chronophoto output selector with composite, transparent poses, individual poses, and background enabled](docs/images/chronophoto-layer-export.png)
 
-*The simple one-file export remains the default; layer controls stay folded
-away until they are needed.*
+## Shape the trail and background independently
+
+The workspace separates effects into two scopes:
+
+- **Trail effects** follow the detected subject, sharp poses, photographic
+  stretch, and dense cloned copies. Every lane has its own motion keyframes.
+- **Background effects** process only the clean plate. These lanes use one
+  constant value because the background is a single layer, not a sequence.
+
+Start with `0 → 100 → 0`, `0 → 100`, or `100 → 0`, then drag the keyframes or
+enter exact percentages. Each trail-effect lane can use **Full movement** to run
+its curve once across the selected clip, or **Trail duration** to reapply it
+from the oldest visible trail position to the current subject. This makes it
+possible to fade the trail by age while saturation or blend still follows the
+complete movement. Full movement remains the default and is also used for still
+composites.
+
+Drag lanes to change processing order, stack blend modes, or bypass an effect
+without losing its settings. The two editors collapse independently so the
+image or video remains the centre of the workspace.
+
+![Chronophoto with separate trail and background effect editors](docs/images/chronophoto-effect-timeline.png)
 
 ## Real-footage examples
 
@@ -282,8 +314,9 @@ warning. Code signing and macOS notarization are tracked separately.
 ## Technical notes
 
 Chronophoto is a Python 3.11+ desktop application built with PySide6. PyAV
-provides FFmpeg-backed decoding, while NumPy and OpenCV handle frame analysis,
-masking, alignment, and compositing. Pillow writes the final image files.
+provides FFmpeg-backed decoding and MP4 encoding, while NumPy and OpenCV handle
+frame analysis, masking, alignment, and compositing. Pillow writes the final
+image files.
 A separate FFmpeg installation is not required.
 
 All processing code is kept independent from the Qt interface so future mask
@@ -297,7 +330,8 @@ video (PyAV / FFmpeg) ─┐
 photo stack ───────────┘       │
                                ├─> temporal median clean plate
                                ├─> motion masks
-                               └─> chronological composite
+                               ├─> chronological composite
+                               └─> timestamp-windowed motion-trail video
 ```
 
 Clean-plate generation uses a temporal median of up to 21 evenly distributed
@@ -321,6 +355,13 @@ cd chronophoto
 git clone https://github.com/m-a-x-s-e-e-l-i-g/chronophoto.git
 cd chronophoto
 bash run.sh
+```
+
+On Ubuntu or WSL, install the standard virtual-environment package first if
+Python reports that `ensurepip` is unavailable:
+
+```bash
+sudo apt install python3-venv
 ```
 
 Manual setup:
@@ -371,8 +412,8 @@ macOS, and Linux. The **Build release** workflow produces all desktop packages
 when it is started manually or when a matching version tag is pushed.
 
 ```bash
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.3.0
+git push origin v0.3.0
 ```
 
 The tag must match `project.version` in `pyproject.toml`. Tagged builds publish
@@ -385,6 +426,7 @@ can be regenerated without personal footage:
 
 ```powershell
 python scripts\capture_readme.py
+python scripts\render_motion_video_sample.py
 python scripts\generate_icons.py
 ```
 

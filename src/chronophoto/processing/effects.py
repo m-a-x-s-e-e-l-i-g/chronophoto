@@ -110,6 +110,8 @@ EFFECT_DEFAULT_AMOUNTS = {
     "halftone": 10.0,
 }
 
+EFFECT_TIMING_BASES = ("movement", "trail")
+
 
 @dataclass(slots=True, frozen=True)
 class EffectKeyframe:
@@ -134,6 +136,7 @@ class EffectTrack:
     enabled: bool = True
     amount: float = 0.0
     option: str = ""
+    timing_basis: str = "movement"
 
     def __post_init__(self) -> None:
         if self.kind not in EFFECT_KINDS:
@@ -149,6 +152,8 @@ class EffectTrack:
             raise ValueError("effect keyframes must be ordered and unique")
         if not math.isfinite(self.amount) or not 0.0 <= self.amount <= 200.0:
             raise ValueError("effect amount must be between 0 and 200")
+        if self.timing_basis not in EFFECT_TIMING_BASES:
+            raise ValueError(f"unsupported effect timing: {self.timing_basis}")
         if self.kind == "blend_mode":
             option = self.option or "normal"
             if option not in BLEND_MODES:
@@ -194,7 +199,20 @@ def effect_preset(track: EffectTrack, preset: str) -> EffectTrack:
         track.enabled,
         track.amount,
         track.option,
+        track.timing_basis,
     )
+
+
+def effect_track_progress(
+    track: EffectTrack,
+    movement_progress: float,
+    trail_progress: float | None = None,
+) -> float:
+    """Select the timeline clock configured for one effect track."""
+
+    if track.timing_basis == "trail" and trail_progress is not None:
+        return trail_progress
+    return movement_progress
 
 
 def _color_dodge(backdrop: NDArray[np.float32], source: NDArray[np.float32]) -> NDArray[np.float32]:
@@ -462,6 +480,7 @@ def apply_effect_tracks(
     tracks: tuple[EffectTrack, ...],
     *,
     pixel_scale: float = 1.0,
+    trail_progress: float | None = None,
 ) -> tuple[ImageArray, MaskArray]:
     """Apply a stack of effects to subject pixels while preserving the background clip."""
 
@@ -478,7 +497,7 @@ def apply_effect_tracks(
     alpha = effected_mask[top:bottom, left:right]
 
     for track in active:
-        value = track.value_at(progress)
+        value = track.value_at(effect_track_progress(track, progress, trail_progress))
         if track.kind == "opacity":
             alpha = alpha * (value / 100.0)
         elif track.kind == "saturation" and value < 99.999:

@@ -52,8 +52,8 @@ QLabel#versionNumber, QLabel#updateStatus {
     letter-spacing: 1px;
 }
 QLabel#versionNumber { color: #c8c8c8; }
-QLabel#updateStatus[state="available"] { color: #f0f0f0; font-weight: 700; }
-QLabel#updateStatus[state="current"] { color: #a8a8a8; }
+QLabel#updateStatus[state="available"] { color: #ff6b6b; font-weight: 700; }
+QLabel#updateStatus[state="current"] { color: #70d98b; font-weight: 700; }
 QLabel#updateStatus[state="unavailable"] { color: #6f6f6f; }
 QPushButton#headerButton {
     min-height: 27px;
