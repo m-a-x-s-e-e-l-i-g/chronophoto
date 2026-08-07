@@ -6,7 +6,113 @@ from pathlib import Path
 
 from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QKeyEvent, QMouseEvent, QPainter, QPen, QWheelEvent
-from PySide6.QtWidgets import QComboBox, QFrame, QLabel, QSlider, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (
+    QComboBox,
+    QFrame,
+    QHBoxLayout,
+    QLabel,
+    QProgressBar,
+    QPushButton,
+    QSlider,
+    QVBoxLayout,
+    QWidget,
+)
+
+
+class BackgroundTaskView(QFrame):
+    """Compact status-bar view for independently running background work."""
+
+    cancel_requested = Signal(str)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("backgroundTaskView")
+        self.setAccessibleName("Background tasks")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(10, 6, 8, 7)
+        layout.setSpacing(4)
+
+        self.heading = QLabel("BACKGROUND")
+        self.heading.setObjectName("backgroundTaskHeading")
+        layout.addWidget(self.heading)
+
+        self._rows: dict[str, QFrame] = {}
+        self._details: dict[str, QLabel] = {}
+        self._progress: dict[str, QProgressBar] = {}
+        self._cancel_buttons: dict[str, QPushButton] = {}
+        for kind, label in (("preview", "PREVIEW"), ("export", "EXPORT")):
+            row = QFrame()
+            row.setObjectName("backgroundTaskRow")
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(8)
+
+            kind_label = QLabel(label)
+            kind_label.setObjectName("backgroundTaskKind")
+            kind_label.setFixedWidth(58)
+            detail = QLabel()
+            detail.setObjectName("backgroundTaskDetail")
+            detail.setMinimumWidth(150)
+            detail.setMaximumWidth(260)
+            progress = QProgressBar()
+            progress.setObjectName("backgroundTaskProgress")
+            progress.setRange(0, 100)
+            progress.setValue(0)
+            progress.setTextVisible(False)
+            progress.setFixedWidth(104)
+            cancel = QPushButton("Cancel")
+            cancel.setObjectName("taskCancelButton")
+            cancel.setAccessibleName(f"Cancel {label.lower()}")
+            cancel.clicked.connect(
+                lambda checked=False, selected=kind: self.cancel_requested.emit(selected)
+            )
+
+            row_layout.addWidget(kind_label)
+            row_layout.addWidget(detail, 1)
+            row_layout.addWidget(progress)
+            row_layout.addWidget(cancel)
+            layout.addWidget(row)
+            row.hide()
+            self._rows[kind] = row
+            self._details[kind] = detail
+            self._progress[kind] = progress
+            self._cancel_buttons[kind] = cancel
+
+        self.hide()
+
+    def start_task(self, kind: str, detail: str) -> None:
+        self._details[kind].setText(detail)
+        self._details[kind].setToolTip(detail)
+        self._progress[kind].setValue(1)
+        self._cancel_buttons[kind].setEnabled(True)
+        self._rows[kind].show()
+        self.show()
+        self._sync_heading()
+
+    def update_task(self, kind: str, value: int, detail: str) -> None:
+        self._progress[kind].setValue(value)
+        self._details[kind].setText(detail)
+        self._details[kind].setToolTip(detail)
+
+    def set_cancelling(self, kind: str) -> None:
+        self._details[kind].setText("Stopping after the current step")
+        self._details[kind].setToolTip("Stopping after the current processing step")
+        self._cancel_buttons[kind].setEnabled(False)
+
+    def remove_task(self, kind: str) -> None:
+        self._rows[kind].hide()
+        self._progress[kind].setValue(0)
+        if any(not row.isHidden() for row in self._rows.values()):
+            self._sync_heading()
+        else:
+            self.hide()
+
+    def is_task_visible(self, kind: str) -> bool:
+        return not self._rows[kind].isHidden()
+
+    def _sync_heading(self) -> None:
+        count = sum(not row.isHidden() for row in self._rows.values())
+        self.heading.setText("BACKGROUND" if count == 1 else f"BACKGROUND · {count} TASKS")
 
 
 class ScrollSafeComboBox(QComboBox):

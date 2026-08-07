@@ -54,6 +54,21 @@ def test_export_layer_overlap_respects_the_selected_pose_order() -> None:
     assert np.array_equal(oldest.combined_poses[10, 14, :3], (220, 50, 30))
 
 
+def test_export_layers_place_the_selected_focus_pose_on_top() -> None:
+    frames, masks, background = _fixture()
+
+    layers = build_export_layers(
+        frames,
+        masks,
+        background,
+        ComposeSettings(overlap="newest"),
+        [0.0, 1.0],
+        top_pose_index=0,
+    )
+
+    assert np.array_equal(layers.combined_poses[10, 14, :3], (220, 50, 30))
+
+
 def test_export_package_writes_selected_layers_without_overwriting(tmp_path) -> None:
     frames, masks, background = _fixture()
     layers = build_export_layers(frames, masks, background, ComposeSettings(), [0.0, 1.0])

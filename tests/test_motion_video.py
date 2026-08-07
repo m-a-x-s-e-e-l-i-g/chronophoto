@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 import pytest
 
+import chronophoto.processing.compositor as compositor_module
 from chronophoto.processing import (
     ComposeCache,
     ComposeSettings,
@@ -59,6 +60,63 @@ def test_motion_trail_frame_excludes_old_and_future_positions() -> None:
     assert result[24, 50, 0] > 150  # Current subject at t=1.5 remains.
     assert result[24, 8, 0] < 80  # Old subject at t=0.0 has disappeared.
     assert result[24, 64, 0] < 80  # Future subject at t=2.0 is never included.
+
+
+@pytest.mark.parametrize(
+    ("overlap", "expected_index"),
+    (("newest", 3), ("oldest", 0)),
+)
+def test_motion_trail_overlap_selects_the_only_top_pose(
+    overlap: str,
+    expected_index: int,
+) -> None:
+    colors = ((210, 30, 20), (30, 210, 60), (40, 70, 220), (220, 180, 30))
+    frames = [np.full((4, 4, 3), color, dtype=np.uint8) for color in colors]
+    timestamps = [0.0, 0.2, 0.9, 1.0]
+    background = np.zeros_like(frames[0])
+    masks = [np.full((4, 4), 255, dtype=np.uint8) for _ in frames]
+
+    result = compose_motion_trail_frame(
+        frames,
+        timestamps,
+        3,
+        1.0,
+        ComposeSettings(overlap=overlap),
+        ComposeCache(background, masks),
+    )
+
+    assert np.array_equal(result[0, 0], colors[expected_index])
+
+
+@pytest.mark.parametrize(
+    ("overlap", "expected_index"),
+    (("newest", 3), ("oldest", 0)),
+)
+def test_motion_trail_smear_repaints_only_the_selected_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+    overlap: str,
+    expected_index: int,
+) -> None:
+    frames = [np.full((4, 4, 3), index * 40, dtype=np.uint8) for index in range(4)]
+    masks = [np.full((4, 4), 255, dtype=np.uint8) for _ in frames]
+    painted_indices: list[int] = []
+    original_blend_pose = compositor_module._blend_pose
+
+    def record_blend_pose(result, frame, *args, **kwargs):  # type: ignore[no-untyped-def]
+        painted_indices.append(int(frame[0, 0, 0] // 40))
+        return original_blend_pose(result, frame, *args, **kwargs)
+
+    monkeypatch.setattr(compositor_module, "_blend_pose", record_blend_pose)
+    compose_motion_trail_frame(
+        frames,
+        [0.0, 0.2, 0.9, 1.0],
+        3,
+        1.0,
+        ComposeSettings(overlap=overlap, smear_style="photographic"),
+        ComposeCache(np.zeros_like(frames[0]), masks),
+    )
+
+    assert painted_indices == [expected_index]
 
 
 def test_zero_duration_keeps_only_the_current_subject() -> None:
@@ -134,7 +192,7 @@ def test_motion_video_rejects_implausible_connectors_between_adjacent_frames(
     )
 
     assert np.array_equal(result[60, 120], background[60, 120])
-    assert result[20, 20, 0] > 150
+    assert np.array_equal(result[20, 20], background[20, 20])
     assert result[98, 218, 0] > 150
 
 
