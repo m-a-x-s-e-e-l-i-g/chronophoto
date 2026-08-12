@@ -5,23 +5,11 @@ from bisect import bisect_left
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from threading import Event
-from typing import Literal
 
 import numpy as np
 from PIL import Image, ImageOps
-from PySide6.QtCore import (
-    QObject,
-    QSettings,
-    QSignalBlocker,
-    Qt,
-    QThread,
-    QTimer,
-    QUrl,
-    Signal,
-    Slot,
-)
-from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QKeySequence
+from PySide6.QtCore import QSettings, QSignalBlocker, Qt, QThread, QTimer, QUrl, Slot
+from PySide6.QtGui import QAction, QCloseEvent, QDesktopServices, QGuiApplication, QKeySequence
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -46,24 +34,45 @@ from PySide6.QtWidgets import (
 
 from chronophoto import __version__
 from chronophoto.processing import (
+    PRESET_SUFFIX,
+    ChronophotoPreset,
     ComposeCache,
     ComposeSettings,
     ExportKind,
     MediaSequence,
+    RenderTelemetry,
+    ResolvePackageResult,
     align_sequence,
     available_package_directory,
+    available_resolve_package_directory,
     build_compose_cache,
     build_export_layers,
+    can_stream_motion_trail,
     compose_sequence,
     load_image_sequence,
     load_video_sequence,
     order_image_paths,
+    read_preset,
     render_motion_trail_sequence,
     select_video_sequence,
     write_export_package,
     write_motion_trail_video,
+    write_preset,
+    write_resolve_package,
+    write_streaming_motion_trail_video,
 )
-from chronophoto.processing.sources import VideoInfo, probe_video
+from chronophoto.processing.sources import probe_video
+from chronophoto.ui.controllers import (
+    DocumentController,
+    ExportRecipeController,
+    PreviewController,
+    RenderRequest,
+    SourceController,
+    SourceState,
+    TaskKind,
+    TaskWorker,
+    should_expand_advanced,
+)
 from chronophoto.ui.effects import EffectTimelinePanel
 from chronophoto.ui.widgets import (
     BackgroundTaskView,
@@ -84,84 +93,11 @@ from chronophoto.updates import (
 )
 
 
-class TaskCancelled(RuntimeError):
-    pass
-
-
-TaskKind = Literal["preview", "export"]
-
-
-@dataclass(slots=True)
-class SourceState:
-    kind: str
-    paths: list[Path]
-    video_info: VideoInfo | None = None
-
-
-@dataclass(slots=True, frozen=True)
-class RenderRequest:
-    kind: str
-    paths: tuple[Path, ...]
-    start: float
-    end: float
-    pose_count: int | None
-    settings: ComposeSettings
-    alignment: str
-    max_dimension: int | None
-    cache_key: tuple[object, ...]
-    video_selection_key: tuple[object, ...] | None
-    video_cache_key: tuple[object, ...] | None
-    video_duration: float
-    video_frame_rate: float
-    enabled_video_indices: tuple[int, ...] | None
-    focus_pose_index: int | None
-    source_dimensions: tuple[int, int]
-
-
 @dataclass(slots=True)
 class VideoAnalysisCache:
     key: tuple[object, ...]
     frames: list[np.ndarray]
     compose_cache: ComposeCache
-
-
-class TaskWorker(QObject):
-    finished = Signal(str, object)
-    failed = Signal(str, str)
-    cancelled = Signal(str)
-    progress = Signal(str, int, str)
-
-    def __init__(
-        self,
-        task: Callable[[Callable[[int, str], None]], object],
-        task_kind: TaskKind = "preview",
-    ) -> None:
-        super().__init__()
-        self.task = task
-        self.task_kind = task_kind
-        self._cancel = Event()
-
-    def request_cancel(self) -> None:
-        self._cancel.set()
-
-    @Slot()
-    def run(self) -> None:
-        def report(value: int, message: str) -> None:
-            if self._cancel.is_set():
-                raise TaskCancelled
-            self.progress.emit(self.task_kind, value, message)
-
-        try:
-            result = self.task(report)
-            if self._cancel.is_set():
-                raise TaskCancelled
-        except TaskCancelled:
-            self.cancelled.emit(self.task_kind)
-            return
-        except Exception as exc:  # noqa: BLE001 - translated into a recoverable UI state
-            self.failed.emit(self.task_kind, str(exc))
-            return
-        self.finished.emit(self.task_kind, result)
 
 
 class ChronophotoWindow(QMainWindow):
@@ -180,7 +116,10 @@ class ChronophotoWindow(QMainWindow):
         self.setMinimumSize(960, 680)
         self.setAcceptDrops(True)
 
-        self.source: SourceState | None = None
+        self.source_controller = SourceController()
+        self.document_controller = DocumentController()
+        self.preview_controller = PreviewController()
+        self.export_recipe_controller = ExportRecipeController()
         self.preview_result: np.ndarray | None = None
         self.preview_frames: list[np.ndarray] = []
         self.preview_masks: list[np.ndarray] = []
@@ -198,13 +137,12 @@ class ChronophotoWindow(QMainWindow):
         self._task_threads: dict[TaskKind, QThread] = {}
         self._task_workers: dict[TaskKind, TaskWorker] = {}
         self._task_callbacks: dict[TaskKind, Callable[[object], None]] = {}
-        self._pending_preview = False
-        self._preview_revision = 0
-        self._preview_dirty = False
         self._updating_frames = False
         self._loading_source = False
         self._close_when_done = False
         self._last_export_path: Path | None = None
+        self._last_render_telemetry: RenderTelemetry | None = None
+        self._applying_preset = False
         self._github_target_url = GITHUB_REPOSITORY_URL
         self._update_manager: QNetworkAccessManager | None = None
         self.settings_store = QSettings("Chronophoto", "Chronophoto")
@@ -222,10 +160,59 @@ class ChronophotoWindow(QMainWindow):
         self.playback_timer.timeout.connect(self._advance_pose)
 
         self._build_ui()
+        self._connect_preset_tracking()
         self._build_shortcuts()
         self._set_loaded_state(False)
         if check_updates:
             QTimer.singleShot(250, self._check_for_updates)
+
+    @property
+    def source(self) -> SourceState | None:
+        return self.source_controller.state
+
+    @source.setter
+    def source(self, state: SourceState | None) -> None:
+        self.source_controller.replace(state)
+
+    @property
+    def _pending_preview(self) -> bool:
+        return self.preview_controller.pending
+
+    @_pending_preview.setter
+    def _pending_preview(self, value: bool) -> None:
+        self.preview_controller.pending = value
+
+    @property
+    def _preview_revision(self) -> int:
+        return self.preview_controller.revision
+
+    @_preview_revision.setter
+    def _preview_revision(self, value: int) -> None:
+        self.preview_controller.revision = value
+
+    @property
+    def _preview_dirty(self) -> bool:
+        return self.preview_controller.dirty
+
+    @_preview_dirty.setter
+    def _preview_dirty(self, value: bool) -> None:
+        self.preview_controller.dirty = value
+
+    @property
+    def _preset_path(self) -> Path | None:
+        return self.document_controller.preset_path
+
+    @_preset_path.setter
+    def _preset_path(self, value: Path | None) -> None:
+        self.document_controller.preset_path = value
+
+    @property
+    def _preset_display_name(self) -> str:
+        return self.document_controller.preset_display_name
+
+    @_preset_display_name.setter
+    def _preset_display_name(self, value: str) -> None:
+        self.document_controller.preset_display_name = value
 
     def _build_ui(self) -> None:
         root = QWidget()
@@ -272,9 +259,12 @@ class ChronophotoWindow(QMainWindow):
         wordmark.setObjectName("wordmark")
         strapline = QLabel("MOTION, HELD STILL")
         strapline.setObjectName("strapline")
-        local = QLabel("LOCAL")
-        local.setObjectName("privacyBadge")
-        local.setToolTip("Video and photos stay on this computer")
+        self.media_privacy_badge = QLabel("MEDIA STAYS LOCAL")
+        self.media_privacy_badge.setObjectName("privacyBadge")
+        self.media_privacy_badge.setAccessibleName("Media stays local")
+        self.media_privacy_badge.setToolTip(
+            "Video and photos are never uploaded. Update checks may contact GitHub."
+        )
         self.version_number = QLabel(f"v{__version__}")
         self.version_number.setObjectName("versionNumber")
         self.version_number.setAccessibleName(f"Chronophoto version {__version__}")
@@ -289,7 +279,7 @@ class ChronophotoWindow(QMainWindow):
         layout.addWidget(wordmark)
         layout.addWidget(strapline)
         layout.addStretch()
-        layout.addWidget(local)
+        layout.addWidget(self.media_privacy_badge)
         layout.addWidget(self.version_number)
         layout.addWidget(self.update_status)
         layout.addWidget(self.github_button)
@@ -620,15 +610,11 @@ class ChronophotoWindow(QMainWindow):
         self.export_options_button.setAccessibleName("Choose export outputs")
         self.export_options_button.clicked.connect(self._toggle_export_options)
         actions.addWidget(self.export_options_button)
-        self.export_button = QPushButton("Export composite")
+        self.export_button = QPushButton("Export")
         self.export_button.setObjectName("primaryButton")
+        self.export_button.setAccessibleName("Export the selected output recipe")
         self.export_button.clicked.connect(self.export_composite)
-        self.trail_video_button = QPushButton("Export trail video")
-        self.trail_video_button.setObjectName("quietButton")
-        self.trail_video_button.setAccessibleName("Export motion-trail video")
-        self.trail_video_button.clicked.connect(self.export_motion_video)
         actions.addStretch()
-        actions.addWidget(self.trail_video_button)
         actions.addWidget(self.export_button)
         layout.addLayout(actions)
         return workspace
@@ -639,11 +625,11 @@ class ChronophotoWindow(QMainWindow):
         layout = QVBoxLayout(panel)
         layout.setContentsMargins(12, 9, 12, 10)
         layout.setSpacing(7)
-        heading = QLabel("EXPORT OUTPUTS")
+        heading = QLabel("EXPORT RECIPE")
         heading.setObjectName("controlLabel")
         note = QLabel(
-            "Choose any combination. Batches use a named PNG folder. Transparent poses "
-            "keep pixel effects; blend modes stay in the composite."
+            "Choose one destination. PNG layers may be combined in one package; trail video "
+            "and DaVinci Resolve are complete standalone exports."
         )
         note.setObjectName("effectEmpty")
         note.setWordWrap(True)
@@ -658,6 +644,8 @@ class ChronophotoWindow(QMainWindow):
             ("combined_poses", "Poses · combined transparent PNG"),
             ("individual_poses", "Poses · separate transparent PNGs"),
             ("background", "Background only"),
+            ("trail_video", "Motion-trail MP4"),
+            ("resolve_timeline", "DaVinci Resolve timeline"),
         )
         self.export_checks: dict[ExportKind, QCheckBox] = {}
         for index, (kind, label) in enumerate(labels):
@@ -667,6 +655,22 @@ class ChronophotoWindow(QMainWindow):
             choices.addWidget(checkbox, index // 2, index % 2)
             self.export_checks[kind] = checkbox
         layout.addLayout(choices)
+        self.export_recipe_summary = QLabel("Finished composite · full source resolution")
+        self.export_recipe_summary.setObjectName("controlHint")
+        self.export_recipe_summary.setWordWrap(True)
+        self.export_recipe_summary.setAccessibleName("Selected export recipe")
+        layout.addWidget(self.export_recipe_summary)
+        telemetry_row = QHBoxLayout()
+        self.render_backend_summary = QLabel("Backend diagnostics appear after video export")
+        self.render_backend_summary.setObjectName("controlHint")
+        self.render_backend_summary.setWordWrap(True)
+        self.copy_diagnostics_button = QPushButton("COPY DIAGNOSTICS")
+        self.copy_diagnostics_button.setObjectName("effectTextButton")
+        self.copy_diagnostics_button.setEnabled(False)
+        self.copy_diagnostics_button.clicked.connect(self._copy_render_diagnostics)
+        telemetry_row.addWidget(self.render_backend_summary, 1)
+        telemetry_row.addWidget(self.copy_diagnostics_button)
+        layout.addLayout(telemetry_row)
         return panel
 
     def _build_inspector(self) -> QWidget:
@@ -695,6 +699,7 @@ class ChronophotoWindow(QMainWindow):
         title.setObjectName("panelTitleCompact")
         layout.addLayout(heading_row)
         layout.addWidget(title)
+        layout.addWidget(self._build_preset_bar())
 
         self.pose_count = ScrollSafeSlider(Qt.Orientation.Horizontal)
         self.pose_count.setRange(2, 40)
@@ -812,7 +817,9 @@ class ChronophotoWindow(QMainWindow):
             self.trail_style,
         )
         self.trail_style_control.setToolTip("Work in progress")
-        advanced_layout.addWidget(self.trail_style_control)
+        # Retain the internal value for old presets without advertising a
+        # selector until multiple trail styles are complete.
+        self.trail_style_control.hide()
         self.smear_style = ScrollSafeComboBox()
         self.smear_style.addItem("None", "none")
         self.smear_style.addItem("Photographic stretch", "photographic")
@@ -858,6 +865,38 @@ class ChronophotoWindow(QMainWindow):
         layout.addWidget(tip)
         scroll.setWidget(panel)
         return scroll
+
+    def _build_preset_bar(self) -> QFrame:
+        bar = QFrame()
+        bar.setObjectName("presetBar")
+        layout = QVBoxLayout(bar)
+        layout.setContentsMargins(10, 8, 10, 9)
+        layout.setSpacing(6)
+        heading = QLabel("COMPLETE PRESET")
+        heading.setObjectName("controlLabel")
+        layout.addWidget(heading)
+        row = QHBoxLayout()
+        row.setSpacing(5)
+        self.preset_name = QLabel("CUSTOM SETTINGS")
+        self.preset_name.setObjectName("presetName")
+        self.preset_name.setToolTip(
+            "Presets contain composition controls, complete effect stacks, and outputs"
+        )
+        self.load_preset_button = QPushButton("LOAD")
+        self.load_preset_button.setObjectName("effectTextButton")
+        self.load_preset_button.setAccessibleName("Load complete preset")
+        self.load_preset_button.setToolTip("Load preset · Ctrl+Alt+O")
+        self.load_preset_button.clicked.connect(self._load_preset)
+        self.save_preset_button = QPushButton("SAVE AS")
+        self.save_preset_button.setObjectName("effectTextButton")
+        self.save_preset_button.setAccessibleName("Save complete preset")
+        self.save_preset_button.setToolTip("Save complete preset · Ctrl+Alt+S")
+        self.save_preset_button.clicked.connect(self._save_preset)
+        row.addWidget(self.preset_name, 1)
+        row.addWidget(self.load_preset_button)
+        row.addWidget(self.save_preset_button)
+        layout.addLayout(row)
+        return bar
 
     def _pose_count_control(self) -> QWidget:
         wrapper = QWidget()
@@ -955,12 +994,219 @@ class ChronophotoWindow(QMainWindow):
         for shortcut, handler in (
             (QKeySequence.StandardKey.Open, self._choose_source),
             (QKeySequence.StandardKey.SaveAs, self.export_composite),
+            (QKeySequence("Ctrl+Alt+O"), self._load_preset),
+            (QKeySequence("Ctrl+Alt+S"), self._save_preset),
             (QKeySequence("Space"), self._toggle_playback),
         ):
             action = QAction(self)
             action.setShortcut(shortcut)
             action.triggered.connect(handler)
             self.addAction(action)
+
+    def _connect_preset_tracking(self) -> None:
+        for slider in (self.pose_count, self.trail_duration, self.threshold, self.feather):
+            slider.valueChanged.connect(self._mark_preset_modified)
+        self.all_frames.toggled.connect(self._mark_preset_modified)
+        for combo in (
+            self.background_mode,
+            self.overlap_mode,
+            self.trail_style,
+            self.smear_style,
+            self.alignment_mode,
+            self.photo_order_mode,
+        ):
+            combo.currentIndexChanged.connect(self._mark_preset_modified)
+        self.trail_effect_timeline.tracks_committed.connect(self._mark_preset_modified)
+        self.background_effect_timeline.tracks_committed.connect(self._mark_preset_modified)
+        for checkbox in self.export_checks.values():
+            checkbox.toggled.connect(self._mark_preset_modified)
+
+    @Slot()
+    def _save_preset(self) -> None:
+        if not self.source:
+            return
+        last_dir = Path(str(self.settings_store.value("last_preset_dir", Path.home())))
+        if self._preset_path is not None:
+            suggested = self._preset_path
+        else:
+            suggested = last_dir / f"{self.source.paths[0].stem}-look{PRESET_SUFFIX}"
+        selected, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save complete Chronophoto preset",
+            str(suggested),
+            "Chronophoto presets (*.chronophoto-preset.json);;JSON files (*.json)",
+        )
+        if not selected:
+            return
+        destination = self._normalized_preset_path(Path(selected))
+        name = self._preset_name_from_path(destination)
+        try:
+            write_preset(destination, self._preset_snapshot(name))
+        except Exception as exc:  # noqa: BLE001 - file errors need a recoverable dialog
+            QMessageBox.warning(self, "Could not save preset", self._friendly_error(str(exc)))
+            return
+        self.settings_store.setValue("last_preset_dir", str(destination.parent))
+        self._set_preset_identity(destination, name)
+        self.status_text.setText("PRESET SAVED")
+        self.status_detail.setText(f"{name} · complete settings, effects, and outputs")
+
+    @Slot()
+    def _load_preset(self) -> None:
+        if not self.source:
+            return
+        last_dir = self.settings_store.value("last_preset_dir", str(Path.home()))
+        selected, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load complete Chronophoto preset",
+            str(last_dir),
+            "Chronophoto presets (*.chronophoto-preset.json *.json)",
+        )
+        if not selected:
+            return
+        source = Path(selected)
+        try:
+            preset = read_preset(source)
+            adapted = self._apply_preset(preset)
+        except Exception as exc:  # noqa: BLE001 - invalid presets must not alter the workspace
+            QMessageBox.warning(self, "Could not load preset", self._friendly_error(str(exc)))
+            return
+        self.settings_store.setValue("last_preset_dir", str(source.parent))
+        self._set_preset_identity(source, preset.name)
+        self.status_text.setText("PRESET LOADED")
+        self.status_detail.setText(
+            f"{preset.name} · pose count or trail duration adapted to this source"
+            if adapted
+            else f"{preset.name} · complete settings and effects restored"
+        )
+
+    def _preset_snapshot(self, name: str) -> ChronophotoPreset:
+        return ChronophotoPreset(
+            name=name,
+            settings=self._settings_snapshot(),
+            pose_count=self.pose_count.value(),
+            use_all_frames=self.all_frames.isChecked(),
+            trail_duration_ms=self.trail_duration.value(),
+            alignment=str(self.alignment_mode.currentData()),
+            photo_order=str(self.photo_order_mode.currentData()),
+            outputs=self._export_selections(),
+        )
+
+    def _apply_preset(self, preset: ChronophotoPreset) -> bool:
+        """Restore one complete preset and report source-dependent clamping."""
+
+        if self.source is None:
+            raise ValueError("Choose footage before loading a preset")
+        for combo, value in (
+            (self.background_mode, preset.settings.background),
+            (self.overlap_mode, preset.settings.overlap),
+            (self.trail_style, preset.settings.trail_style),
+            (self.smear_style, preset.settings.smear_style),
+            (self.alignment_mode, preset.alignment),
+            (self.photo_order_mode, preset.photo_order),
+        ):
+            if combo.findData(value) < 0:
+                raise ValueError(f"Preset value is not available in this version: {value}")
+        self._loading_source = True
+        self._applying_preset = True
+        try:
+            requested_pose_count = preset.pose_count
+            self.pose_count.setValue(
+                max(self.pose_count.minimum(), min(requested_pose_count, self.pose_count.maximum()))
+            )
+            use_all_frames = preset.use_all_frames and bool(
+                self.source and self.source.kind == "video"
+            )
+            self.all_frames.setChecked(use_all_frames)
+            requested_trail_duration = preset.trail_duration_ms
+            self.trail_duration.setValue(
+                max(
+                    self.trail_duration.minimum(),
+                    min(requested_trail_duration, self.trail_duration.maximum()),
+                )
+            )
+            settings = preset.settings
+            self.threshold.setValue(settings.threshold)
+            self.feather.setValue(settings.feather)
+            self._set_combo_data(self.background_mode, settings.background)
+            self._set_combo_data(self.overlap_mode, settings.overlap)
+            self._set_combo_data(self.trail_style, settings.trail_style)
+            self._set_combo_data(self.smear_style, settings.smear_style)
+            self._set_combo_data(self.alignment_mode, preset.alignment)
+            self._set_combo_data(self.photo_order_mode, preset.photo_order)
+            self.trail_effect_timeline.set_tracks(settings.trail_effect_tracks)
+            self.background_effect_timeline.set_tracks(settings.background_effect_tracks)
+            for kind, checkbox in self.export_checks.items():
+                with QSignalBlocker(checkbox):
+                    checkbox.setChecked(kind in preset.outputs)
+            show_advanced = should_expand_advanced(
+                settings,
+                alignment=preset.alignment,
+                photo_order=preset.photo_order,
+                source_kind=self.source.kind,
+            )
+            self.advanced_toggle.setChecked(show_advanced)
+            if settings.trail_effect_tracks or not settings.background_effect_tracks:
+                self.trail_effect_timeline.set_expanded(True)
+                self.background_effect_timeline.set_expanded(False)
+            else:
+                self.trail_effect_timeline.set_expanded(False)
+                self.background_effect_timeline.set_expanded(True)
+            self._sync_all_frames_state()
+            self._update_trail_duration_label()
+            self._sync_export_controls()
+            self._update_compact_workspace()
+        finally:
+            self._applying_preset = False
+            self._loading_source = False
+        if self.source.kind == "photos":
+            self._photo_order_changed()
+        else:
+            self._schedule_preview()
+        return (
+            self.pose_count.value() != requested_pose_count
+            or self.trail_duration.value() != requested_trail_duration
+        )
+
+    @staticmethod
+    def _set_combo_data(combo: ScrollSafeComboBox, value: str) -> None:
+        index = combo.findData(value)
+        if index < 0:
+            raise ValueError(f"Preset value is not available in this version: {value}")
+        combo.setCurrentIndex(index)
+
+    @staticmethod
+    def _normalized_preset_path(path: Path) -> Path:
+        lowered = path.name.lower()
+        if lowered.endswith(PRESET_SUFFIX):
+            return path
+        if lowered.endswith(".chronophoto-preset"):
+            return path.with_name(path.name + ".json")
+        if path.suffix.lower() == ".json":
+            return path
+        return path.with_name(path.name + PRESET_SUFFIX)
+
+    @staticmethod
+    def _preset_name_from_path(path: Path) -> str:
+        if path.name.lower().endswith(PRESET_SUFFIX):
+            return path.name[: -len(PRESET_SUFFIX)]
+        return path.stem
+
+    def _set_preset_identity(self, path: Path | None, name: str = "Custom settings") -> None:
+        self.document_controller.set_preset(path, name)
+        visible = self.document_controller.visible_name()
+        self.preset_name.setText(visible if len(visible) <= 24 else visible[:21] + "…")
+        self.preset_name.setToolTip(self.document_controller.tooltip())
+
+    @Slot()
+    def _mark_preset_modified(self) -> None:
+        if self._loading_source or self._applying_preset or not self.source:
+            return
+        if self._preset_path is None:
+            self._set_preset_identity(None)
+            return
+        visible = self.document_controller.visible_name(modified=True)
+        self.preset_name.setText(visible if len(visible) <= 24 else visible[:21] + "…")
+        self.preset_name.setToolTip(self.document_controller.tooltip(modified=True))
 
     @Slot(bool)
     def _set_drop_overlay_active(self, active: bool) -> None:
@@ -1081,6 +1327,7 @@ class ChronophotoWindow(QMainWindow):
             self._sync_all_frames_state()
             self.preview_heading.setText(paths[0].stem.replace("_", " "))
             self.settings_store.setValue("last_source_dir", str(paths[0].parent))
+            self._set_preset_identity(None)
             self._set_loaded_state(True)
             self._loading_source = False
             self.render_preview()
@@ -1534,6 +1781,7 @@ class ChronophotoWindow(QMainWindow):
                 self.source.video_info.width,
                 self.source.video_info.height,
             )
+            pixel_aspect_ratio = self.source.video_info.pixel_aspect_ratio
         else:
             start, end = 0.0, 0.0
             paths = self._ordered_photo_paths()
@@ -1547,6 +1795,7 @@ class ChronophotoWindow(QMainWindow):
                 raise ValueError("Enable at least two photographs")
             with Image.open(paths[0]) as image:
                 source_dimensions = ImageOps.exif_transpose(image).size
+            pixel_aspect_ratio = (1, 1)
         focus_pose_index = None if motion_video else self._focus_pose_index(paths, enabled_indices)
         cache_key = (
             self.source.kind,
@@ -1573,6 +1822,7 @@ class ChronophotoWindow(QMainWindow):
             enabled_video_indices=enabled_indices,
             focus_pose_index=focus_pose_index,
             source_dimensions=source_dimensions,
+            pixel_aspect_ratio=pixel_aspect_ratio,
         )
 
     @Slot()
@@ -1911,6 +2161,25 @@ class ChronophotoWindow(QMainWindow):
         trail_duration = self._trail_duration_seconds()
 
         def task(progress: Callable[[int, str], None]):
+            if can_stream_motion_trail(request.settings):
+                written, telemetry = write_streaming_motion_trail_video(
+                    export_path,
+                    request.paths[0],
+                    trail_duration,
+                    request.settings,
+                    start=request.start,
+                    end=request.end,
+                    frame_rate=request.video_frame_rate,
+                    alignment=request.alignment,
+                    effect_pixel_scale=1.0,
+                    progress=progress,
+                )
+                return (
+                    written,
+                    telemetry.rendered_frames,
+                    request.source_dimensions,
+                    telemetry,
+                )
             sequence = load_video_sequence(
                 request.paths[0],
                 request.start,
@@ -1951,7 +2220,7 @@ class ChronophotoWindow(QMainWindow):
                 effect_pixel_scale=1.0,
                 progress=lambda value, message: progress(60 + int(value * 0.40), message),
             )
-            return written, len(aligned), aligned[-1]
+            return written, len(aligned), request.source_dimensions, None
 
         def on_finished(payload: object) -> None:
             self._video_export_finished(payload, request.paths)
@@ -1964,12 +2233,20 @@ class ChronophotoWindow(QMainWindow):
         )
 
     def _video_export_finished(self, payload: object, source_paths: tuple[Path, ...]) -> None:
-        path, frame_count, last_frame = payload  # type: ignore[misc]
+        path, frame_count, source_dimensions, telemetry = payload  # type: ignore[misc]
         self._last_export_path = Path(path)
+        self._last_render_telemetry = telemetry
+        if isinstance(telemetry, RenderTelemetry):
+            self.render_backend_summary.setText(
+                f"{telemetry.decoder} · {telemetry.compositor} · {telemetry.encoder} · "
+                f"{telemetry.render_fps:.1f} fps · bottleneck: {telemetry.bottleneck}"
+            )
+            self.render_backend_summary.setToolTip(telemetry.as_text())
+            self.copy_diagnostics_button.setEnabled(True)
         self.open_export_button.show()
         if self._current_source_paths() == source_paths:
             self.result_meta.setText(
-                f"Motion trail · {last_frame.shape[1]} × {last_frame.shape[0]} · "
+                f"Motion trail · {source_dimensions[0]} × {source_dimensions[1]} · "
                 f"{frame_count} frames"
             )
         self._finish_task("export", "VIDEO EXPORT COMPLETE", Path(path).name)
@@ -1980,6 +2257,12 @@ class ChronophotoWindow(QMainWindow):
             return
         selections = self._export_selections()
         if not selections:
+            return
+        if selections == ("trail_video",):
+            self.export_motion_video()
+            return
+        if selections == ("resolve_timeline",):
+            self.export_resolve_timeline()
             return
         try:
             request = self._render_request(None)
@@ -2135,6 +2418,139 @@ class ChronophotoWindow(QMainWindow):
             task_kind="export",
         )
 
+    def export_resolve_timeline(self) -> None:
+        if not self.source or self._task_active("export"):
+            return
+        try:
+            request = self._render_request(None)
+        except ValueError as exc:
+            self.status_text.setText("CHECK FRAMES")
+            self.status_detail.setText(str(exc))
+            return
+        last_dir = Path(str(self.settings_store.value("last_export_dir", str(Path.home()))))
+        selected_directory = QFileDialog.getExistingDirectory(
+            self,
+            "Choose folder for the DaVinci Resolve package",
+            str(last_dir),
+        )
+        if not selected_directory:
+            return
+        export_path = available_resolve_package_directory(
+            Path(selected_directory), request.paths[0].stem
+        )
+        self.settings_store.setValue("last_export_dir", str(export_path.parent))
+        trail_duration = self._trail_duration_seconds()
+
+        def task(progress: Callable[[int, str], None]):
+            progress(2, "Reading full-resolution source")
+            if request.kind == "video":
+                sequence = load_video_sequence(
+                    request.paths[0],
+                    request.start,
+                    request.end,
+                    None,
+                    progress=lambda value, message: progress(int(value * 0.25), message),
+                )
+            else:
+                sequence = load_image_sequence(
+                    request.paths,
+                    sort_mode="input",
+                    progress=lambda value, message: progress(int(value * 0.25), message),
+                )
+            aligned = align_sequence(
+                sequence.frames,
+                request.alignment,
+                progress=lambda value, message: progress(25 + int(value * 0.10), message),
+            )
+            analysis = build_compose_cache(
+                aligned,
+                request.settings,
+                progress=lambda value, message: progress(35 + int(value * 0.15), message),
+            )
+            effect_progress = self._normalized_effect_progress(
+                sequence.timestamps,
+                len(aligned),
+                request.start,
+                request.end,
+            )
+            if request.kind == "video":
+                aligned_sequence = MediaSequence(
+                    aligned,
+                    sequence.labels,
+                    sequence.source_size,
+                    sequence.timestamps,
+                    list(range(len(aligned))),
+                )
+                pose_sequence = select_video_sequence(
+                    aligned_sequence,
+                    request.start,
+                    request.end,
+                    request.pose_count,
+                )
+                pose_indices = list(pose_sequence.source_indices or [])
+                pose_labels = list(pose_sequence.labels)
+                if request.enabled_video_indices is not None:
+                    enabled = [
+                        index
+                        for index in request.enabled_video_indices
+                        if index < len(pose_indices)
+                    ]
+                    pose_indices = [pose_indices[index] for index in enabled]
+                    pose_labels = [pose_labels[index] for index in enabled]
+            else:
+                pose_indices = list(range(len(aligned)))
+                pose_labels = list(sequence.labels)
+            result = write_resolve_package(
+                export_path,
+                source_path=request.paths[0],
+                frames=aligned,
+                cache=analysis,
+                settings=request.settings,
+                pose_indices=pose_indices,
+                pose_labels=pose_labels,
+                effect_progress=effect_progress,
+                timestamps=sequence.timestamps,
+                start=request.start,
+                end=request.end,
+                frame_rate=request.video_frame_rate,
+                trail_duration=trail_duration,
+                pixel_aspect_ratio=request.pixel_aspect_ratio,
+                focus_pose_index=request.focus_pose_index,
+                progress=lambda value, message: progress(50 + int(value * 0.50), message),
+            )
+            return result
+
+        def on_finished(payload: object) -> None:
+            self._resolve_export_finished(payload, request.paths)
+
+        self._start_task(
+            task,
+            on_finished,
+            "Building DaVinci Resolve timeline",
+            task_kind="export",
+        )
+
+    def _resolve_export_finished(
+        self,
+        payload: object,
+        source_paths: tuple[Path, ...],
+    ) -> None:
+        if not isinstance(payload, ResolvePackageResult):
+            raise TypeError("Unexpected Resolve export result")
+        result = payload
+        self._last_export_path = result.directory
+        if self._current_source_paths() == source_paths:
+            self.result_meta.setText(
+                f"Resolve timeline · {result.width} × {result.height} · {result.frame_rate:.3f} fps"
+            )
+        self.open_export_button.show()
+        audio_detail = "source audio" if result.has_audio else "no source audio"
+        self._finish_task(
+            "export",
+            "RESOLVE EXPORT COMPLETE",
+            f"{result.file_count} files · {audio_detail} · {result.directory.name}",
+        )
+
     def _export_finished(self, payload: object, source_paths: tuple[Path, ...]) -> None:
         path, result, output_count = payload  # type: ignore[misc]
         self._last_export_path = Path(path)
@@ -2153,8 +2569,20 @@ class ChronophotoWindow(QMainWindow):
         self._sync_export_controls()
         self._update_compact_workspace()
 
-    @Slot()
-    def _export_choices_changed(self) -> None:
+    @Slot(bool)
+    def _export_choices_changed(self, checked: bool = False) -> None:
+        sender = self.sender()
+        if checked and sender in self.export_checks.values():
+            checked_kind = next(
+                kind for kind, checkbox in self.export_checks.items() if checkbox is sender
+            )
+            normalized = self.export_recipe_controller.normalized_after_check(
+                self._export_selections(),
+                checked_kind,
+            )
+            for kind, checkbox in self.export_checks.items():
+                with QSignalBlocker(checkbox):
+                    checkbox.setChecked(kind in normalized)
         self._sync_export_controls()
 
     def _export_selections(self) -> tuple[ExportKind, ...]:
@@ -2162,25 +2590,13 @@ class ChronophotoWindow(QMainWindow):
 
     def _sync_export_controls(self, *, busy: bool | None = None) -> None:
         selections = self._export_selections()
-        labels = {
-            "composite": "COMPOSITE",
-            "combined_poses": "POSES",
-            "individual_poses": "SEPARATE POSES",
-            "background": "BACKGROUND",
-        }
-        if not selections:
-            summary = "NONE"
-        elif len(selections) == 1:
-            summary = labels[selections[0]]
-        else:
-            summary = f"{len(selections)} SELECTED"
+        summary = self.export_recipe_controller.short_summary(selections)
         marker = "▾" if self.export_options_button.isChecked() else "▸"
         self.export_options_button.setText(f"OUTPUTS · {summary} {marker}")
-        if selections == ("composite",):
-            self.export_button.setText("Export composite")
-        else:
-            count = len(selections)
-            self.export_button.setText(f"Export {count} output{'s' if count != 1 else ''}")
+        self.export_button.setText("Export")
+        recipe = self.export_recipe_controller.description(selections)
+        self.export_recipe_summary.setText(recipe)
+        self.export_recipe_summary.setToolTip(recipe)
         is_busy = self._task_active("export") if busy is None else busy
         enabled = self.source is not None and bool(selections) and not is_busy
         self.export_button.setEnabled(enabled)
@@ -2189,7 +2605,7 @@ class ChronophotoWindow(QMainWindow):
         return task_kind in self._task_threads
 
     def _current_source_paths(self) -> tuple[Path, ...]:
-        return tuple(self.source.paths) if self.source else ()
+        return self.source_controller.paths
 
     def _start_task(
         self,
@@ -2299,7 +2715,7 @@ class ChronophotoWindow(QMainWindow):
         loaded = self.source is not None
         is_video = loaded and bool(self.source and self.source.kind == "video")
         export_active = self._task_active("export")
-        self.trail_video_button.setEnabled(is_video and not export_active)
+        self.export_checks["trail_video"].setEnabled(is_video)
         self._sync_export_controls(busy=export_active)
 
     def _set_loaded_state(self, loaded: bool) -> None:
@@ -2316,6 +2732,8 @@ class ChronophotoWindow(QMainWindow):
         for checkbox in self.export_checks.values():
             checkbox.setEnabled(loaded)
         self.reset_button.setEnabled(loaded)
+        self.load_preset_button.setEnabled(loaded)
+        self.save_preset_button.setEnabled(loaded)
         self.threshold.setEnabled(loaded)
         self.feather.setEnabled(loaded)
         self.background_mode.setEnabled(loaded)
@@ -2326,7 +2744,11 @@ class ChronophotoWindow(QMainWindow):
         is_video = loaded and bool(self.source and self.source.kind == "video")
         self.preview_mode_buttons["trail"].setVisible(is_video)
         self.trail_duration_control.setVisible(is_video)
-        self.trail_video_button.setVisible(is_video)
+        self.export_checks["trail_video"].setVisible(is_video)
+        if not is_video and self.export_checks["trail_video"].isChecked():
+            with QSignalBlocker(self.export_checks["trail_video"]):
+                self.export_checks["trail_video"].setChecked(False)
+            self.export_checks["composite"].setChecked(True)
         if not is_video and self._current_preview_mode() == "trail":
             self.preview_mode_buttons["composite"].setChecked(True)
         self.pose_control.setVisible(is_video)
@@ -2388,8 +2810,7 @@ class ChronophotoWindow(QMainWindow):
         self._update_compact_workspace()
 
     def _mark_preview_dirty(self, detail: str) -> None:
-        self._preview_revision += 1
-        self._preview_dirty = True
+        self.preview_controller.mark_dirty()
         self.status_text.setText("PREVIEW OUT OF DATE")
         self.status_detail.setText(detail)
         self._refresh_preview_canvas()
@@ -2477,6 +2898,7 @@ class ChronophotoWindow(QMainWindow):
         else:
             self.alignment_mode.setCurrentIndex(self.alignment_mode.findData("translation"))
         self._loading_source = False
+        self._mark_preset_modified()
         self._schedule_preview()
 
     @staticmethod
@@ -2652,6 +3074,13 @@ class ChronophotoWindow(QMainWindow):
                 else self._last_export_path.parent
             )
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(target)))
+
+    def _copy_render_diagnostics(self) -> None:
+        if self._last_render_telemetry is None:
+            return
+        QGuiApplication.clipboard().setText(self._last_render_telemetry.as_text())
+        self.status_text.setText("DIAGNOSTICS COPIED")
+        self.status_detail.setText("Video backend and throughput details copied to the clipboard")
 
     @staticmethod
     def _friendly_error(message: str) -> str:

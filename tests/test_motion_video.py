@@ -7,8 +7,10 @@ import av
 import cv2
 import numpy as np
 import pytest
+from PIL import Image
 
 import chronophoto.processing.compositor as compositor_module
+import chronophoto.processing.motion_video as motion_video_module
 from chronophoto.processing import (
     ComposeCache,
     ComposeSettings,
@@ -18,7 +20,10 @@ from chronophoto.processing import (
     compose_motion_trail_frame,
     load_video_sequence,
     motion_trail_window,
+    render_motion_trail_sequence,
+    write_layered_reference_video,
     write_motion_trail_video,
+    write_selected_audio,
 )
 
 
@@ -168,6 +173,90 @@ def test_trail_timed_effect_restarts_across_each_visible_window() -> None:
     assert result[24, 50, 0] > 150  # Current subject ends at 100% opacity.
 
 
+@pytest.mark.parametrize("overlap", ["newest", "oldest"])
+def test_reused_motion_layers_match_independent_frame_rendering(overlap: str) -> None:
+    frames = _moving_subject_frames(6)
+    masks: list[np.ndarray] = []
+    for frame in frames:
+        active = np.max(np.abs(frame.astype(np.int16) - frames[0].astype(np.int16)), axis=2)
+        masks.append(cv2.GaussianBlur((active > 0).astype(np.uint8) * 255, (5, 5), 0))
+    timestamps = [index * 0.2 for index in range(len(frames))]
+    progress_positions = np.linspace(0.0, 1.0, len(frames)).tolist()
+    opacity = EffectTrack(
+        "opacity",
+        (EffectKeyframe(0.0, 70.0), EffectKeyframe(1.0, 100.0)),
+    )
+    settings = ComposeSettings(overlap=overlap, trail_effect_tracks=(opacity,))
+    cache = ComposeCache(np.full_like(frames[0], (18, 28, 42)), masks)
+
+    preview = render_motion_trail_sequence(
+        frames,
+        timestamps,
+        0.5,
+        settings,
+        cache,
+        effect_progress=progress_positions,
+    )
+    reused = [
+        pixels
+        for _index, pixels in motion_video_module._iter_reused_motion_trail_frames(
+            frames,
+            timestamps,
+            0.5,
+            settings,
+            cache,
+            effect_progress=progress_positions,
+            effect_pixel_scale=1.0,
+            frame_indices=range(len(frames)),
+        )
+    ]
+    independent = [
+        compose_motion_trail_frame(
+            frames,
+            timestamps,
+            index,
+            0.5,
+            settings,
+            cache,
+            effect_progress=progress_positions,
+        )
+        for index in range(len(frames))
+    ]
+
+    assert all(
+        np.array_equal(reused_frame, independent_frame)
+        for reused_frame, independent_frame in zip(reused, independent, strict=True)
+    )
+    assert all(
+        np.max(np.abs(preview_frame.astype(np.int16) - independent_frame.astype(np.int16))) <= 2
+        for preview_frame, independent_frame in zip(preview, independent, strict=True)
+    )
+
+
+def test_reused_motion_layers_fall_back_for_window_relative_or_procedural_effects() -> None:
+    trail_opacity = EffectTrack(
+        "opacity",
+        (EffectKeyframe(0.0, 0.0), EffectKeyframe(1.0, 100.0)),
+        timing_basis="trail",
+    )
+    multiply = EffectTrack(
+        "blend_mode",
+        (EffectKeyframe(0.0, 100.0), EffectKeyframe(1.0, 100.0)),
+        option="multiply",
+    )
+
+    assert motion_video_module._can_reuse_motion_layers(ComposeSettings())
+    assert not motion_video_module._can_reuse_motion_layers(
+        ComposeSettings(trail_effect_tracks=(trail_opacity,))
+    )
+    assert not motion_video_module._can_reuse_motion_layers(
+        ComposeSettings(trail_effect_tracks=(multiply,))
+    )
+    assert not motion_video_module._can_reuse_motion_layers(
+        ComposeSettings(smear_style="photographic")
+    )
+
+
 @pytest.mark.parametrize("smear_style", ["photographic", "dense_clones"])
 def test_motion_video_rejects_implausible_connectors_between_adjacent_frames(
     smear_style: str,
@@ -226,6 +315,97 @@ def test_motion_trail_mp4_retains_audio_and_source_dimensions(tmp_path: Path) ->
         assert video.codec_context.name == "h264"
         assert 1.6 <= float(container.duration / av.time_base) <= 2.1
         assert len(list(container.decode(video))) == len(sequence.frames)
+
+
+def test_selected_audio_wav_is_trimmed_and_portable(tmp_path: Path) -> None:
+    source = tmp_path / "source.mp4"
+    _write_source_video_with_audio(source)
+    output = tmp_path / "source-audio.wav"
+
+    written = write_selected_audio(output, source, start=0.5, end=1.25)
+
+    assert written == output
+    with av.open(str(output)) as container:
+        assert len(container.streams.audio) == 1
+        stream = container.streams.audio[0]
+        assert stream.codec_context.name == "pcm_s16le"
+        assert stream.codec_context.sample_rate == 48_000
+        decoded_samples = sum(frame.samples for frame in container.decode(stream))
+    assert 35_000 <= decoded_samples <= 37_000
+
+
+def test_layered_reference_video_reuses_rendered_alpha_frames(tmp_path: Path) -> None:
+    background_path = tmp_path / "background.png"
+    Image.new("RGB", (80, 48), (12, 30, 60)).save(background_path)
+    overlays: list[Path] = []
+    for index, left in enumerate((8, 40), start=1):
+        pixels = np.zeros((48, 80, 4), dtype=np.uint8)
+        pixels[12:36, left : left + 20] = (230, 60, 25, 255)
+        path = tmp_path / f"trail-{index}.png"
+        Image.fromarray(pixels).save(path)
+        overlays.append(path)
+    output = tmp_path / "reference.mp4"
+    messages: list[str] = []
+
+    written = write_layered_reference_video(
+        output,
+        background_path,
+        overlays,
+        [0.0, 0.25],
+        frame_rate=4.0,
+        progress=lambda _value, message: messages.append(message),
+    )
+
+    assert written == output
+    with av.open(str(output)) as container:
+        stream = container.streams.video[0]
+        assert (stream.width, stream.height) == (80, 48)
+        assert stream.codec_context.name == "h264"
+        decoded = [frame.to_ndarray(format="rgb24") for frame in container.decode(stream)]
+    assert len(decoded) == 2
+    assert decoded[0][24, 14, 0] > 180
+    assert decoded[1][24, 46, 0] > 180
+    assert any(
+        label in message
+        for message in messages
+        for label in ("Apple VideoToolbox", "NVIDIA NVENC", "CPU H.264")
+    )
+
+
+def test_apple_video_encoder_requires_videotoolbox_hardware(monkeypatch) -> None:
+    monkeypatch.setattr(motion_video_module.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        motion_video_module,
+        "_codec_available",
+        lambda name: name == "h264_videotoolbox",
+    )
+
+    candidates = motion_video_module._video_encoder_candidates(3840, 2160)
+
+    assert [candidate.codec for candidate in candidates] == [
+        "h264_videotoolbox",
+        "libx264",
+    ]
+    assert candidates[0].label == "Apple VideoToolbox"
+    assert candidates[0].hardware
+    assert candidates[0].options == {"allow_sw": "0"}
+
+
+def test_hardware_encoders_are_not_used_for_odd_dimensions(monkeypatch) -> None:
+    monkeypatch.setattr(motion_video_module.sys, "platform", "darwin")
+    monkeypatch.setattr(motion_video_module, "_codec_available", lambda _name: True)
+
+    candidates = motion_video_module._video_encoder_candidates(81, 48)
+
+    assert [candidate.codec for candidate in candidates] == ["libx264"]
+
+
+@pytest.mark.skipif(
+    motion_video_module.sys.platform != "darwin",
+    reason="VideoToolbox is available only in macOS builds",
+)
+def test_macos_pyav_build_exposes_videotoolbox_encoder() -> None:
+    assert motion_video_module._codec_available("h264_videotoolbox")
 
 
 def test_invalid_trail_duration_is_rejected() -> None:

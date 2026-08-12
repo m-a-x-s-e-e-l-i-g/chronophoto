@@ -9,6 +9,7 @@ from chronophoto.processing import (
     EffectTrack,
     available_package_directory,
     build_export_layers,
+    build_transparent_poses,
     write_export_package,
 )
 
@@ -38,6 +39,21 @@ def test_export_layers_create_transparent_combined_and_individual_poses() -> Non
     assert np.array_equal(layers.poses[0][2, 2, :3], (0, 0, 0))
     assert layers.combined_poses[10, 14, 1] > layers.combined_poses[10, 14, 0]
     assert np.array_equal(layers.background, background)
+
+
+def test_transparent_poses_can_be_reused_without_combining() -> None:
+    frames, masks, _background = _fixture()
+
+    poses = build_transparent_poses(
+        frames,
+        masks,
+        ComposeSettings(),
+        [0.0, 1.0],
+    )
+
+    assert len(poses) == 2
+    assert all(pose.shape == (24, 36, 4) for pose in poses)
+    assert poses[0][10, 8, 3] == 255
 
 
 def test_export_layer_overlap_respects_the_selected_pose_order() -> None:

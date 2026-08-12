@@ -742,6 +742,15 @@ class EffectTimelinePanel(QFrame):
         self._lanes.clear()
         self._sync_state()
 
+    def set_tracks(self, tracks: tuple[EffectTrack, ...]) -> None:
+        """Replace the complete ordered stack and notify listeners once."""
+
+        self.clear()
+        for track in tracks:
+            self._append_track(track)
+        self._sync_state()
+        self.tracks_committed.emit()
+
     def set_compact(self, compact: bool) -> None:
         self._compact = compact
         self.scroll.setMaximumHeight(
@@ -766,6 +775,13 @@ class EffectTimelinePanel(QFrame):
         track = neutral_effect_track(kind)
         if kind == "blend_mode":
             track = effect_preset(track, "full")
+        lane = self._append_track(track)
+        self._sync_state()
+        self.set_expanded(True)
+        self.tracks_committed.emit()
+        return lane
+
+    def _append_track(self, track: EffectTrack) -> EffectLane:
         lane = EffectLane(track, keyframed=self._keyframed)
         lane.track_changing.connect(lambda _track: self.tracks_changing.emit())
         lane.track_committed.connect(self._lane_committed)
@@ -775,10 +791,7 @@ class EffectTimelinePanel(QFrame):
         lane.drag_finished.connect(self._drag_finished)
         self._lanes.append(lane)
         self.lane_layout.insertWidget(len(self._lanes) - 1, lane)
-        self._sync_state()
         lane.set_compact(self._compact)
-        self.set_expanded(True)
-        self.tracks_committed.emit()
         return lane
 
     def _lane_committed(self, track: object) -> None:

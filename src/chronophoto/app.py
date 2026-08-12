@@ -85,6 +85,16 @@ QLabel#panelTitleCompact {
     font-size: 18px;
     font-weight: 700;
 }
+QFrame#presetBar {
+    background: #121212;
+    border: 1px solid #303030;
+}
+QLabel#presetName {
+    color: #d8d8d8;
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.7px;
+}
 QLabel#workspaceTitle {
     color: #eeeeee;
     font-size: 18px;

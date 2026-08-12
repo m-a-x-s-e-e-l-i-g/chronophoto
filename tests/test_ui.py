@@ -26,7 +26,15 @@ from PySide6.QtWidgets import QApplication, QSlider  # noqa: E402
 
 from chronophoto import __version__  # noqa: E402
 from chronophoto.app import application_stylesheet, main  # noqa: E402
-from chronophoto.processing import BLEND_MODES, EffectKeyframe  # noqa: E402
+from chronophoto.processing import (  # noqa: E402
+    BLEND_MODES,
+    ChronophotoPreset,
+    ComposeSettings,
+    EffectKeyframe,
+    EffectTrack,
+    ResolvePackageResult,
+    read_preset,
+)
 from chronophoto.processing.sources import MediaSequence, VideoInfo  # noqa: E402
 from chronophoto.ui.effects import EffectKeyframeGraph  # noqa: E402
 from chronophoto.ui.widgets import (  # noqa: E402
@@ -52,6 +60,140 @@ def test_application_icon_asset_is_valid() -> None:
 
     assert icon_path.is_file()
     assert not icon.isNull()
+
+
+def test_complete_preset_file_restores_controls_effect_stacks_and_outputs(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _app = QApplication.instance() or QApplication([])
+    window = ChronophotoWindow()
+    source = tmp_path / "parkour.mp4"
+    window.source = SourceState(
+        "video",
+        [source],
+        VideoInfo(source, 8.0, 2160, 3840, 30.0, 240),
+    )
+    window._set_loaded_state(True)
+    window.pose_count.setRange(2, 100)
+    window.trail_duration.setRange(0, 8_000)
+    scheduled: list[bool] = []
+
+    def schedule_preview() -> None:
+        if not window._loading_source:
+            scheduled.append(True)
+
+    monkeypatch.setattr(window, "_schedule_preview", schedule_preview)
+    monkeypatch.setattr(window, "render_preview", lambda: None)
+
+    trail_track = EffectTrack(
+        "opacity",
+        (
+            EffectKeyframe(0.0, 20.0),
+            EffectKeyframe(0.5, 100.0),
+            EffectKeyframe(1.0, 45.0),
+        ),
+        enabled=False,
+        timing_basis="trail",
+    )
+    background_track = EffectTrack(
+        "saturation",
+        (EffectKeyframe(0.0, 36.0), EffectKeyframe(1.0, 36.0)),
+    )
+    window.pose_count.setValue(17)
+    window.all_frames.setChecked(False)
+    window.trail_duration.setValue(2_350)
+    window.threshold.setValue(29)
+    window.feather.setValue(8)
+    window.background_mode.setCurrentIndex(window.background_mode.findData("last"))
+    window.overlap_mode.setCurrentIndex(window.overlap_mode.findData("oldest"))
+    window.smear_style.setCurrentIndex(window.smear_style.findData("photographic"))
+    window.alignment_mode.setCurrentIndex(window.alignment_mode.findData("translation"))
+    window.photo_order_mode.setCurrentIndex(window.photo_order_mode.findData("capture_time"))
+    window.trail_effect_timeline.set_tracks((trail_track,))
+    window.background_effect_timeline.set_tracks((background_track,))
+    for kind, checkbox in window.export_checks.items():
+        with QSignalBlocker(checkbox):
+            checkbox.setChecked(kind in {"composite", "individual_poses", "background"})
+    window._sync_export_controls()
+
+    selected = tmp_path / "Silver rush"
+    saved = tmp_path / "Silver rush.chronophoto-preset.json"
+
+    class PresetDialog:
+        @staticmethod
+        def getSaveFileName(*args, **kwargs):  # type: ignore[no-untyped-def]
+            del args, kwargs
+            return str(selected), ""
+
+        @staticmethod
+        def getOpenFileName(*args, **kwargs):  # type: ignore[no-untyped-def]
+            del args, kwargs
+            return str(saved), ""
+
+    monkeypatch.setattr("chronophoto.ui.window.QFileDialog", PresetDialog)
+    window._save_preset()
+
+    assert saved.is_file()
+    stored = read_preset(saved)
+    assert stored.pose_count == 17
+    assert stored.settings.trail_effect_tracks == (trail_track,)
+    assert stored.settings.background_effect_tracks == (background_track,)
+    assert stored.outputs == ("composite", "individual_poses", "background")
+    assert window.preset_name.text() == "SILVER RUSH"
+
+    window.pose_count.setValue(3)
+    window.threshold.setValue(10)
+    window.trail_effect_timeline.clear()
+    assert "MODIFIED" in window.preset_name.text()
+    scheduled.clear()
+    window._load_preset()
+
+    assert window.pose_count.value() == 17
+    assert not window.all_frames.isChecked()
+    assert window.trail_duration.value() == 2_350
+    assert window.threshold.value() == 29
+    assert window.feather.value() == 8
+    assert window.background_mode.currentData() == "last"
+    assert window.overlap_mode.currentData() == "oldest"
+    assert window.smear_style.currentData() == "photographic"
+    assert window.alignment_mode.currentData() == "translation"
+    assert window.photo_order_mode.currentData() == "capture_time"
+    assert window.trail_effect_timeline.tracks() == (trail_track,)
+    assert window.background_effect_timeline.tracks() == (background_track,)
+    assert window._export_selections() == ("composite", "individual_poses", "background")
+    assert window.preset_name.text() == "SILVER RUSH"
+    assert scheduled == [True]
+    window.close()
+
+
+def test_complete_preset_adapts_source_dependent_ranges(monkeypatch, tmp_path: Path) -> None:
+    _app = QApplication.instance() or QApplication([])
+    window = ChronophotoWindow()
+    source = tmp_path / "short.mp4"
+    window.source = SourceState(
+        "video",
+        [source],
+        VideoInfo(source, 1.0, 1280, 720, 30.0, 30),
+    )
+    window._set_loaded_state(True)
+    window.pose_count.setRange(2, 12)
+    window.trail_duration.setRange(0, 1_000)
+    monkeypatch.setattr(window, "_schedule_preview", lambda: None)
+    preset = ChronophotoPreset(
+        name="Long movement",
+        settings=ComposeSettings(background="median"),
+        pose_count=30,
+        use_all_frames=False,
+        trail_duration_ms=4_000,
+        alignment="off",
+        photo_order="automatic",
+        outputs=("composite",),
+    )
+
+    assert window._apply_preset(preset)
+    assert window.pose_count.value() == 12
+    assert window.trail_duration.value() == 1_000
+    window.close()
 
 
 def test_terminal_font_is_applied_to_the_stylesheet() -> None:
@@ -222,7 +364,6 @@ def test_active_export_disables_only_duplicate_export_actions() -> None:
     assert window.export_options_button.isEnabled()
     assert all(checkbox.isEnabled() for checkbox in window.export_checks.values())
     assert not window.export_button.isEnabled()
-    assert not window.trail_video_button.isEnabled()
 
     window._task_threads.clear()
     window.background_tasks.remove_task("export")
@@ -470,7 +611,7 @@ def test_mask_controls_use_requested_defaults_and_reset_to_them() -> None:
     window.close()
 
 
-def test_trail_style_is_disabled_and_smear_defaults_to_none() -> None:
+def test_unavailable_trail_style_is_hidden_and_smear_defaults_to_none() -> None:
     _app = QApplication.instance() or QApplication([])
     window = ChronophotoWindow()
 
@@ -478,8 +619,7 @@ def test_trail_style_is_disabled_and_smear_defaults_to_none() -> None:
 
     assert modes == ["solid"]
     assert not window.trail_style.isEnabled()
-    assert window.trail_style.toolTip() == "Work in progress"
-    assert window.trail_style_control.toolTip() == "Work in progress"
+    assert window.trail_style_control.isHidden()
     window.source = SourceState("video", [])
     window._set_loaded_state(True)
     assert not window.trail_style.isEnabled()
@@ -601,7 +741,10 @@ def test_export_outputs_allow_any_layer_combination() -> None:
     window._set_loaded_state(True)
 
     assert window._export_selections() == ("composite",)
-    assert window.export_button.text() == "Export composite"
+    assert window.export_button.text() == "Export"
+    assert window.export_recipe_summary.text() == (
+        "Finished composite image · full source resolution"
+    )
     window.export_options_button.click()
     assert not window.export_options_panel.isHidden()
 
@@ -615,7 +758,7 @@ def test_export_outputs_allow_any_layer_combination() -> None:
         "background",
     )
     assert window.export_options_button.text() == "OUTPUTS · 4 SELECTED ▾"
-    assert window.export_button.text() == "Export 4 outputs"
+    assert window.export_button.text() == "Export"
     window.resize(960, 680)
     window.show()
     app.processEvents()
@@ -633,6 +776,71 @@ def test_export_outputs_allow_any_layer_combination() -> None:
     window.close()
 
 
+def test_resolve_timeline_is_a_first_class_exclusive_output() -> None:
+    _app = QApplication.instance() or QApplication([])
+    window = ChronophotoWindow()
+    path = Path("clip.mp4")
+    window.source = SourceState("video", [path], VideoInfo(path, 3.0, 640, 480, 30.0, 90))
+    window._set_loaded_state(True)
+
+    window.export_checks["resolve_timeline"].setChecked(True)
+
+    assert window._export_selections() == ("resolve_timeline",)
+    assert window.export_button.text() == "Export"
+    assert window.export_recipe_summary.text().startswith("Editable DaVinci Resolve package")
+    window.export_checks["background"].setChecked(True)
+    assert window._export_selections() == ("background",)
+    window.close()
+
+
+def test_resolve_output_routes_to_background_package_export(monkeypatch, tmp_path: Path) -> None:
+    _app = QApplication.instance() or QApplication([])
+    window = ChronophotoWindow()
+    paths = [tmp_path / "one.png", tmp_path / "two.png"]
+    for index, path in enumerate(paths):
+        Image.new("RGB", (32, 20), (20 + index * 100, 40, 80)).save(path)
+    window.source = SourceState("photos", paths)
+    window._populate_photo_frames(paths, "input")
+    window._set_loaded_state(True)
+    window.export_checks["resolve_timeline"].setChecked(True)
+    monkeypatch.setattr(
+        "chronophoto.ui.window.QFileDialog.getExistingDirectory",
+        lambda *a, **k: str(tmp_path),
+    )
+    captured: dict[str, object] = {}
+
+    def write_package(directory, **kwargs):  # type: ignore[no-untyped-def]
+        captured.update(directory=directory, **kwargs)
+        package = Path(directory)
+        return ResolvePackageResult(
+            package,
+            package / "one.fcpxml",
+            package / "manifest.json",
+            7,
+            32,
+            20,
+            5.0,
+            30.0,
+            False,
+        )
+
+    monkeypatch.setattr("chronophoto.ui.window.write_resolve_package", write_package)
+
+    def run_now(task, on_finished, detail, *, task_kind="preview"):  # type: ignore[no-untyped-def]
+        del detail, task_kind
+        on_finished(task(lambda value, message: None))
+
+    monkeypatch.setattr(window, "_start_task", run_now)
+    window.export_composite()
+
+    assert captured["directory"] == tmp_path / "one-chronophoto-resolve"
+    assert captured["timestamps"] is None
+    assert captured["pose_indices"] == [0, 1]
+    assert window.status_text.text() == "RESOLVE EXPORT COMPLETE"
+    assert window._last_export_path == tmp_path / "one-chronophoto-resolve"
+    window.close()
+
+
 def test_motion_trail_controls_are_video_only_and_use_seconds() -> None:
     _app = QApplication.instance() or QApplication([])
     window = ChronophotoWindow()
@@ -643,7 +851,7 @@ def test_motion_trail_controls_are_video_only_and_use_seconds() -> None:
 
     assert not window.preview_mode_buttons["trail"].isHidden()
     assert not window.trail_duration_control.isHidden()
-    assert not window.trail_video_button.isHidden()
+    assert not window.export_checks["trail_video"].isHidden()
     assert window.trail_duration.maximum() == 3_000
     window.trail_duration.setValue(1_400)
     assert window.trail_duration_value.text() == "1.4 s"
@@ -652,7 +860,18 @@ def test_motion_trail_controls_are_video_only_and_use_seconds() -> None:
     window._set_loaded_state(True)
     assert window.preview_mode_buttons["trail"].isHidden()
     assert window.trail_duration_control.isHidden()
-    assert window.trail_video_button.isHidden()
+    assert window.export_checks["trail_video"].isHidden()
+    window.close()
+
+
+def test_media_privacy_badge_distinguishes_media_from_update_checks() -> None:
+    _app = QApplication.instance() or QApplication([])
+    window = ChronophotoWindow()
+
+    assert window.media_privacy_badge.text() == "MEDIA STAYS LOCAL"
+    assert "never uploaded" in window.media_privacy_badge.toolTip()
+    assert "GitHub" in window.media_privacy_badge.toolTip()
+    assert window.media_privacy_badge.accessibleName() == "Media stays local"
     window.close()
 
 
@@ -730,6 +949,7 @@ def test_motion_video_export_uses_every_frame_and_selected_duration(
         return Path(output_path)
 
     monkeypatch.setattr("chronophoto.ui.window.write_motion_trail_video", write_video)
+    monkeypatch.setattr("chronophoto.ui.window.can_stream_motion_trail", lambda _settings: False)
 
     def run_now(task, on_finished, detail, *, task_kind="preview"):  # type: ignore[no-untyped-def]
         del detail, task_kind
