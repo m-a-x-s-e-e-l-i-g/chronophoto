@@ -42,7 +42,8 @@ should appear:
 A jump becomes an arc. A trick keeps its direction and timing. A dance move can
 become a photograph, an animation, or a set of editable layers.
 
-> Your footage stays on your computer. There is no upload and no cloud render.
+> Your media stays on your computer. There is no footage upload or cloud render.
+> The optional release update check contacts GitHub without sending media.
 
 ## Three decisions, then export
 
@@ -64,11 +65,15 @@ and motion masks locally, then keeps them cached while you refine the result.
 - Open **Composite**, choose every frame or a smaller pose count, and export a
   PNG, TIFF, JPEG, or editable layer package. Select an enabled frame and turn
   on **Focus selected pose** to place that pose above the chronological stack.
+- Open **Export recipe**, select an image/layer combination, **Motion-trail
+  MP4**, or **DaVinci Resolve timeline**, then press the single **Export** button.
+  Video and Resolve recipes are exclusive; image and layer outputs can be
+  combined.
 
 ![Chronophoto workspace showing the Trail video preview and a 0.7 second duration](docs/images/motion-trail-ui.png)
 
 *Source, still composite, trail video, mask inspection, timing, effects, and
-both export actions stay in one workspace.*
+the complete export recipe stay in one workspace.*
 
 ## Try the complete example
 
@@ -79,7 +84,8 @@ Want to reproduce the result above?
 2. Drop it into Chronophoto.
 3. Select approximately `00:04.35` to `00:06.65`.
 4. Open **Trail video** and set **Trail duration** to `0.7 s`.
-5. Press **Play**, then choose **Export trail video**.
+5. Press **Play**, select **Motion-trail MP4** in **Export recipe**, then press
+   **Export**.
 
 Or [watch the finished sample directly](docs/videos/motion-trail-bridge-jump.mp4?raw=1)
 (about 150 KB).
@@ -96,6 +102,14 @@ Or [watch the finished sample directly](docs/videos/motion-trail-bridge-jump.mp4
   count.
 - Full-resolution H.264 MP4 export with source timing, dimensions, and the
   selected audio re-encoded to AAC.
+- Automatic hardware H.264 encoding through Apple VideoToolbox on macOS or
+  NVIDIA NVENC when available, with a portable CPU fallback.
+- The common renderer streams decoded frames through a bounded trail window;
+  trail-relative effects, procedural smears, and backdrop blend modes
+  automatically use the compatibility renderer.
+- Export diagnostics identify the active decoder, compositor and encoder,
+  measured FPS, estimated peak working memory and likely bottleneck. NVENC or
+  VideoToolbox encode does not get presented as full GPU rendering.
 - Animated in-app preview, export progress, cancellation, and safe cleanup of
   incomplete files.
 
@@ -107,6 +121,10 @@ Or [watch the finished sample directly](docs/videos/motion-trail-bridge-jump.mp4
 - Full-resolution PNG, TIFF, and JPEG export.
 - Finished composite, combined transparent poses, individual pose PNGs, and a
   clean background layer in any combination.
+- One-click DaVinci Resolve package with a three-track video timeline,
+  processed background, one transparent alpha video, aligned original video,
+  synchronized source audio, and round-trip manifest. Per-frame PNG clips are
+  retained only as a codec compatibility fallback.
 
 ### Creative control
 
@@ -115,6 +133,8 @@ Or [watch the finished sample directly](docs/videos/motion-trail-bridge-jump.mp4
   dithering, and halftone.
 - Mask sensitivity, edge feathering, clean-plate selection, and camera
   translation alignment.
+- Versioned complete presets that restore composition controls, full ordered
+  effect stacks, keyframes, bypass states, and selected outputs.
 - Source, composite, trail-video, and mask views with pointer-centred zoom and
   drag-to-pan.
 
@@ -160,6 +180,59 @@ has no backdrop to blend with.
 
 ![Chronophoto output selector with composite, transparent poses, individual poses, and background enabled](docs/images/chronophoto-layer-export.png)
 
+## DaVinci Resolve timeline export
+
+Open **Export recipe**, choose **DaVinci Resolve timeline**, press **Export**,
+and choose the parent folder. Chronophoto creates a new,
+non-overwriting `-chronophoto-resolve` package. Import the `.fcpxml` file in
+DaVinci Resolve 21 with **File → Import → Timeline**.
+
+![Chronophoto output selector with DaVinci Resolve timeline selected](docs/images/chronophoto-resolve-export.png)
+
+```text
+jump-chronophoto-resolve/
+├── jump.fcpxml
+├── manifest.json
+└── Media/
+    ├── background.png
+    ├── original/
+    │   └── jump.mp4
+    ├── trail/
+    │   └── trail-alpha.mov
+    └── audio/
+        └── source-audio.wav
+```
+
+The imported timeline uses the selected source resolution, pixel aspect ratio,
+frame rate, in/out duration, and chronological overlap order:
+
+- **V1 — Background** is the processed clean plate for the complete timeline.
+- **V2 — Masks / trail** is one timestamped transparent alpha-video clip on one
+  video track, rather than hundreds of media-pool assets and timeline clips.
+- **V3 — Original video** references the selected source clip at the correct in
+  point and starts disabled so it cannot cover the Chronophoto result.
+- **A1 — Source audio** is a trimmed PCM WAV synchronized to the selected in
+  point. It is omitted when the source has no audio.
+
+Photo-stack exports retain their separate editable pose layout because they do
+not have an original video track.
+
+FCPXML media references use URL-escaped absolute `file:///` paths because
+DaVinci Resolve leaves relative media URLs offline. The original video is
+copied byte-for-byte into `Media/original` without re-encoding, so temporary
+source segments and moved originals cannot leave V3 offline. Keep the complete
+package in place until the timeline is imported; if it moves first, export
+again or relink its `Media` folder in Resolve.
+`manifest.json` keeps a relative media inventory and records the source range,
+timeline metadata, Chronophoto settings, and mappings that cannot stay
+editable. Pixel-local effects are baked into alpha media. Blend modes and
+procedural smear styles that FCPXML cannot represent as native Resolve nodes are
+recorded as unsupported mappings for the simplified video timeline.
+
+Before a release, import a generated video and photo-stack package in the
+documented Resolve version and confirm media is online, alpha edges are clean,
+and audio is synchronized.
+
 ## Shape the trail and background independently
 
 The workspace separates effects into two scopes:
@@ -182,6 +255,24 @@ without losing its settings. The two editors collapse independently so the
 image or video remains the centre of the workspace.
 
 ![Chronophoto with separate trail and background effect editors](docs/images/chronophoto-effect-timeline.png)
+
+## Save a complete look as a preset
+
+After loading footage, use **Complete preset → Save as** in the composition
+inspector. Chronophoto writes a readable, versioned
+`.chronophoto-preset.json` file. **Load** restores the complete portable look:
+
+- pose count, every-frame mode, and trail duration;
+- mask, clean plate, overlap, smear, alignment, and photo-order controls;
+- both ordered effect stacks, including every keyframe, timing basis, blend
+  option, amount, and bypass state;
+- selected image, layer, or DaVinci Resolve outputs.
+
+The preset name changes to **Modified** as soon as one captured value changes.
+Pose count and trail duration clamp to shorter source material and the status
+bar reports that adaptation. Source-specific in/out points, enabled frames,
+focus pose, and preview quality are intentionally not stored: they belong to
+the footage or local performance rather than the reusable look.
 
 ## Real-footage examples
 
@@ -330,20 +421,22 @@ modes can share the same source, cache, preview, and export pipeline.
 ### Processing model
 
 ```text
-video (PyAV / FFmpeg) ─┐
-                       ├─> ordered RGB frames
-photo stack ───────────┘       │
-                               ├─> temporal median clean plate
-                               ├─> motion masks
-                               ├─> chronological composite
-                               └─> timestamp-windowed motion-trail video
+decode → align → clean plate → masks → effects → composite → encode
 ```
+
+The render plan models these stages as a typed dependency graph. Materialized
+preview artifacts and streaming export artifacts have explicit lifetimes and
+cache keys, so a future GPU backend can replace a complete route instead of
+adding isolated device calls between CPU copies.
 
 Clean-plate generation uses a temporal median of up to 21 evenly distributed
 frames at full source resolution. It works in small row tiles to keep 4K export
 memory and CPU-cache usage bounded. Export also avoids retaining every
-floating-point mask in memory. Long operations can be cancelled without
-discarding the last successful preview.
+floating-point mask in memory. The common motion-video path decodes, aligns,
+masks, composites and encodes frames incrementally, retaining only clean-plate
+samples and the active trail window instead of the complete selected clip.
+Long operations can be cancelled without discarding the last successful
+preview.
 
 ### Run from source
 
@@ -417,8 +510,8 @@ macOS, and Linux. The **Build release** workflow produces all desktop packages
 when it is started manually or when a matching version tag is pushed.
 
 ```bash
-git tag v0.4.0
-git push origin v0.4.0
+git tag v0.5.0
+git push origin v0.5.0
 ```
 
 The tag must match `project.version` in `pyproject.toml`. Tagged builds publish
@@ -451,6 +544,17 @@ The command writes a composite and mask contact sheet for every clip under
 `build/clip-validation/`. Include moving shadows or foliage, exposure changes,
 fine hair or spokes, subject overlap, and slight camera motion.
 
+Generate a full Resolve package from the bundled bridge-jump source before the
+manual Resolve import smoke test:
+
+```powershell
+python scripts\render_resolve_sample.py
+```
+
+The package is written under `build/verification/` with one real full-resolution
+alpha video, source audio, the aligned original-video reference, FCPXML, and
+manifest metadata.
+
 ### Current technical boundaries
 
 - Motion-difference masking assumes a mostly static background.
@@ -458,7 +562,12 @@ fine hair or spokes, subject overlap, and slight camera motion.
   are not implemented yet.
 - Person-aware masking, combined motion/person masks, and layered exports remain
   future work.
-- Trail style currently stays on **Solid** while additional styles are developed.
+- Solid is the current trail renderer; the style selector remains hidden until
+  a second functional choice exists.
+- A complete hardware decode → GPU composite → hardware encode backend is not
+  bundled yet. Chronophoto only activates such a backend when it registers the
+  full zero-copy contract; partial decode/encode acceleration stays on the
+  measured CPU-compositor path.
 - Release automation exists, but production signing and notarization still need
   platform credentials and policy decisions.
 

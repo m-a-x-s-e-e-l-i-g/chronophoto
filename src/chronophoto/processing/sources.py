@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime
+from fractions import Fraction
 from pathlib import Path
 
 import av
@@ -32,6 +33,14 @@ class VideoInfo:
     height: int
     frame_rate: float
     frame_count: int
+    pixel_aspect_ratio: tuple[int, int] = (1, 1)
+
+
+@dataclass(slots=True, frozen=True)
+class DecodedVideoFrame:
+    index: int
+    timestamp: float
+    pixels: ImageArray
 
 
 def probe_video(path: str | Path) -> VideoInfo:
@@ -45,6 +54,9 @@ def probe_video(path: str | Path) -> VideoInfo:
             duration = float(container.duration / av.time_base)
         frame_rate = float(stream.average_rate) if stream.average_rate else 0.0
         frame_count = int(stream.frames or round(duration * frame_rate))
+        sample_aspect_ratio = (
+            stream.sample_aspect_ratio or stream.codec_context.sample_aspect_ratio or Fraction(1, 1)
+        )
         return VideoInfo(
             source,
             max(duration, 0.01),
@@ -52,6 +64,7 @@ def probe_video(path: str | Path) -> VideoInfo:
             stream.height,
             frame_rate,
             max(1, frame_count),
+            (sample_aspect_ratio.numerator, sample_aspect_ratio.denominator),
         )
 
 
@@ -133,6 +146,37 @@ def load_video_sequence(
         source_size=(frames[0].shape[1], frames[0].shape[0]),
         timestamps=[float(value) for value in targets],
     )
+
+
+def iter_video_frames(
+    path: str | Path,
+    start: float,
+    end: float,
+    *,
+    max_dimension: int | None = None,
+) -> Iterator[DecodedVideoFrame]:
+    """Yield one selected RGB frame at a time without retaining the clip."""
+
+    if start < 0 or end <= start:
+        raise ValueError("end must be later than start")
+    with av.open(str(path)) as container:
+        stream = container.streams.video[0]
+        stream.thread_type = "AUTO"
+        if stream.time_base is not None:
+            seek_pts = max(0, int((start - 0.5) / float(stream.time_base)))
+            container.seek(seek_pts, stream=stream, backward=True, any_frame=False)
+        selected_index = 0
+        for frame in container.decode(stream):
+            if frame.time is None:
+                continue
+            timestamp = float(frame.time)
+            if timestamp < start:
+                continue
+            if timestamp > end:
+                break
+            pixels = _resize(frame.to_ndarray(format="rgb24"), max_dimension)
+            yield DecodedVideoFrame(selected_index, timestamp, pixels)
+            selected_index += 1
 
 
 def _load_all_video_frames(

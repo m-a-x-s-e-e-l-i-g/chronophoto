@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 from time import monotonic, sleep
 
@@ -24,10 +25,10 @@ OUTPUT_DIR = PROJECT_ROOT / "docs" / "images"
 
 def _wait_for_preview(app: QApplication, window: ChronophotoWindow) -> None:
     deadline = monotonic() + 30
-    while window._thread is not None and monotonic() < deadline:
+    while window._task_active("preview") and monotonic() < deadline:
         app.processEvents()
         sleep(0.01)
-    if window._thread is not None or window.preview_result is None:
+    if window._task_active("preview") or window.preview_result is None:
         raise RuntimeError("README preview did not finish")
 
 
@@ -70,9 +71,21 @@ def main() -> int:
     request = window._render_request(window.PREVIEW_MAX_DIMENSION)
     window._video_preview_cache_key = request.video_cache_key
     window._video_preview_cache_sequence = sequence
+    assert request.video_selection_key is not None
+    window._populate_video_frames(labels, request.video_selection_key)
 
     window.show()
     app.processEvents()
+    if "--resolve-only" in sys.argv:
+        window.preview_result = frames[-1]
+        window._refresh_preview_canvas()
+        window.export_options_button.click()
+        window.export_checks["resolve_timeline"].setChecked(True)
+        app.processEvents()
+        window.grab().save(str(OUTPUT_DIR / "chronophoto-resolve-export.png"), "PNG")
+        window.close()
+        print(OUTPUT_DIR.resolve())
+        return 0
     window.render_preview()
     _wait_for_preview(app, window)
 
@@ -125,10 +138,14 @@ def main() -> int:
 
     window.background_effect_timeline.set_expanded(False)
     window.export_options_button.click()
-    for checkbox in window.export_checks.values():
-        checkbox.setChecked(True)
+    for kind, checkbox in window.export_checks.items():
+        checkbox.setChecked(kind != "resolve_timeline")
     app.processEvents()
     window.grab().save(str(OUTPUT_DIR / "chronophoto-layer-export.png"), "PNG")
+
+    window.export_checks["resolve_timeline"].setChecked(True)
+    app.processEvents()
+    window.grab().save(str(OUTPUT_DIR / "chronophoto-resolve-export.png"), "PNG")
 
     window.close()
     print(OUTPUT_DIR.resolve())
