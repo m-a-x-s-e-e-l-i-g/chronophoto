@@ -113,9 +113,19 @@ extern "C" __global__ void rgb_to_uv(
 }
 """
 _MODULE = cp.RawModule(code=_CUDA_SOURCE)
-_KERNELS = {name: _MODULE.get_function(name) for name in (
-    "nv12_to_rgb", "difference_mask", "morphology", "feather", "init_result",
-    "blend", "rgb_to_y", "rgb_to_uv")}
+_KERNELS = {
+    name: _MODULE.get_function(name)
+    for name in (
+        "nv12_to_rgb",
+        "difference_mask",
+        "morphology",
+        "feather",
+        "init_result",
+        "blend",
+        "rgb_to_y",
+        "rgb_to_uv",
+    )
+}
 
 
 def _event(kind: str, **values: object) -> None:
@@ -137,7 +147,8 @@ def _rgb_from_nv12(frame: object) -> cp.ndarray:
     height, width = y.shape[:2]
     rgb = cp.empty((height, width, 3), dtype=cp.uint8)
     _KERNELS["nv12_to_rgb"](
-        ((width + 15) // 16, (height + 15) // 16), (16, 16),
+        ((width + 15) // 16, (height + 15) // 16),
+        (16, 16),
         (y, uv, rgb, width, height, y.strides[0], uv.strides[0]),
     )
     return rgb
@@ -151,7 +162,8 @@ def _write_rgb_to_nv12(rgb: cp.ndarray, frame: object) -> None:
     grid = ((width + 15) // 16, (height + 15) // 16)
     _KERNELS["rgb_to_y"](grid, (16, 16), (rgb, y_plane, width, height, y_plane.strides[0]))
     _KERNELS["rgb_to_uv"](
-        ((width // 2 + 15) // 16, (height // 2 + 15) // 16), (16, 16),
+        ((width // 2 + 15) // 16, (height // 2 + 15) // 16),
+        (16, 16),
         (rgb, uv_plane, width, height, uv_plane.strides[0]),
     )
 
@@ -252,18 +264,21 @@ def render(args: argparse.Namespace) -> None:
             cutoff = timestamp - args.trail_duration
             active = [pose for pose in active if pose[0] >= cutoff]
             _KERNELS["init_result"](
-                ((pixels_count * 3 + 255) // 256,), (256,),
+                ((pixels_count * 3 + 255) // 256,),
+                (256,),
                 (background, result, pixels_count),
             )
             stack = active if args.overlap == "newest" else reversed(active)
             for _pose_time, pose_rgb, pose_mask in stack:
                 _KERNELS["blend"](
-                    ((pixels_count + 255) // 256,), (256,),
+                    ((pixels_count + 255) // 256,),
+                    (256,),
                     (pose_rgb, pose_mask, result, pixels_count),
                 )
             if completed == 0:
                 _KERNELS["blend"](
-                    ((pixels_count + 255) // 256,), (256,),
+                    ((pixels_count + 255) // 256,),
+                    (256,),
                     (active[-1][1], active[-1][2], result, pixels_count),
                 )
             _write_rgb_to_nv12(result, decoded)

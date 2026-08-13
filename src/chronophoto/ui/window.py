@@ -3106,9 +3106,7 @@ class ChronophotoWindow(QMainWindow):
     def _active_playback_timestamps(self) -> list[float]:
         mode = self._current_preview_mode()
         frames = self.preview_trail_frames if mode == "trail" else self.preview_frames
-        timestamps = (
-            self.preview_trail_timestamps if mode == "trail" else self.preview_timestamps
-        )
+        timestamps = self.preview_trail_timestamps if mode == "trail" else self.preview_timestamps
         if len(timestamps) == len(frames) and len(timestamps) > 1:
             return timestamps
         if (
@@ -3162,9 +3160,7 @@ class ChronophotoWindow(QMainWindow):
         first_timestamp = timestamps[0]
         cycle_duration = max(frame_period, timestamps[-1] - first_timestamp + frame_period)
         elapsed = max(0.0, monotonic() - self._playback_started_at)
-        cycle_offset = (
-            self._playback_start_timestamp - first_timestamp + elapsed
-        ) % cycle_duration
+        cycle_offset = (self._playback_start_timestamp - first_timestamp + elapsed) % cycle_duration
         target_timestamp = first_timestamp + min(cycle_offset, timestamps[-1] - first_timestamp)
         position = max(0, bisect_right(timestamps, target_timestamp) - 1)
         if position != self.pose_scrubber.value():

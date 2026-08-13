@@ -84,9 +84,7 @@ def test_nvidia_backend_falls_back_before_unsupported_effect_render() -> None:
         (EffectKeyframe(0.0, 100.0), EffectKeyframe(1.0, 100.0)),
     )
 
-    assert nvidia_backend.BUNDLED_NVIDIA_PIPELINE.supports(
-        ComposeSettings(), "off", 1920, 1080
-    )
+    assert nvidia_backend.BUNDLED_NVIDIA_PIPELINE.supports(ComposeSettings(), "off", 1920, 1080)
     assert not nvidia_backend.BUNDLED_NVIDIA_PIPELINE.supports(
         ComposeSettings(trail_effect_tracks=(effect,)), "off", 1920, 1080
     )

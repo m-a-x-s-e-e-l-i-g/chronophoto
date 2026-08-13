@@ -97,9 +97,7 @@ class BundledNvidiaVideoPipeline:
             payload = json.loads(result.stdout.strip().splitlines()[-1])
             compute = tuple(payload.get("compute_capability", (0, 0)))
             available = (
-                bool(payload.get("available"))
-                and compute >= (6, 1)
-                and self.qualification.passed
+                bool(payload.get("available")) and compute >= (6, 1) and self.qualification.passed
             )
             reason = (
                 f"{payload.get('device_name', 'NVIDIA GPU')} · "
@@ -151,20 +149,35 @@ class BundledNvidiaVideoPipeline:
         available, reason = self.probe()
         if root is None or not available:
             raise RuntimeError(f"Bundled NVIDIA pipeline unavailable: {reason}")
-        raw_descriptor, raw_name = tempfile.mkstemp(
-            prefix="chronophoto-nvidia-", suffix=".h264"
-        )
+        raw_descriptor, raw_name = tempfile.mkstemp(prefix="chronophoto-nvidia-", suffix=".h264")
         os.close(raw_descriptor)
         raw = Path(raw_name)
         started = time.perf_counter()
         command = [
-            str(root / "python.exe"), str(root / "nvidia_worker.py"),
-            "--source", str(source), "--output", str(raw),
-            "--start", str(start), "--end", str(end), "--fps", str(frame_rate),
-            "--trail-duration", str(trail_duration), "--threshold", str(settings.threshold),
-            "--feather", str(settings.feather), "--minimum-component-ratio",
-            str(settings.min_component_ratio), "--background", settings.background,
-            "--overlap", settings.overlap,
+            str(root / "python.exe"),
+            str(root / "nvidia_worker.py"),
+            "--source",
+            str(source),
+            "--output",
+            str(raw),
+            "--start",
+            str(start),
+            "--end",
+            str(end),
+            "--fps",
+            str(frame_rate),
+            "--trail-duration",
+            str(trail_duration),
+            "--threshold",
+            str(settings.threshold),
+            "--feather",
+            str(settings.feather),
+            "--minimum-component-ratio",
+            str(settings.min_component_ratio),
+            "--background",
+            settings.background,
+            "--overlap",
+            settings.overlap,
         ]
         process = subprocess.Popen(
             command,
@@ -214,9 +227,10 @@ class BundledNvidiaVideoPipeline:
     def _mux_h264(raw: Path, target: Path, frame_rate: float) -> None:
         rate = Fraction(frame_rate).limit_denominator(1001)
         time_base = Fraction(rate.denominator, rate.numerator)
-        with av.open(str(raw), format="h264") as source, av.open(
-            str(target), "w", options={"movflags": "+faststart"}
-        ) as output:
+        with (
+            av.open(str(raw), format="h264") as source,
+            av.open(str(target), "w", options={"movflags": "+faststart"}) as output,
+        ):
             input_stream = source.streams.video[0]
             output_stream = output.add_stream_from_template(input_stream)
             for index, packet in enumerate(source.demux(input_stream)):

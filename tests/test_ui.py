@@ -957,9 +957,7 @@ def test_source_playback_uses_video_timestamps_and_skips_late_frames(monkeypatch
     frame_rate = 29.97
     window.source = SourceState("video", [path], VideoInfo(path, 1.0, 40, 24, frame_rate, 6))
     window._set_loaded_state(True)
-    window.preview_frames = [
-        np.full((24, 40, 3), index * 20, dtype=np.uint8) for index in range(6)
-    ]
+    window.preview_frames = [np.full((24, 40, 3), index * 20, dtype=np.uint8) for index in range(6)]
     window.preview_timestamps = [5.0 + index / frame_rate for index in range(6)]
     window._set_preview_mode("source")
 
@@ -1012,9 +1010,7 @@ def test_trail_preview_prerenders_every_source_frame(monkeypatch) -> None:
     window._set_loaded_state(True)
     window.range_slider.set_values(0, 1_000)
     window.preview_debounce.stop()
-    frames = [
-        np.full((24, 40, 3), index % 255, dtype=np.uint8) for index in range(frame_count)
-    ]
+    frames = [np.full((24, 40, 3), index % 255, dtype=np.uint8) for index in range(frame_count)]
     timestamps = [index / frame_rate for index in range(frame_count)]
     cached = MediaSequence(
         frames,

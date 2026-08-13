@@ -683,9 +683,7 @@ def write_streaming_motion_trail_video(
         setup = dependencies["clean_plate"].value
         if not isinstance(setup, _StreamingSetup):
             raise TypeError("clean plate stage returned an invalid setup")
-        if BUNDLED_NVIDIA_PIPELINE.supports(
-            settings, alignment, setup.width, setup.height
-        ):
+        if BUNDLED_NVIDIA_PIPELINE.supports(settings, alignment, setup.width, setup.height):
             available, reason = BUNDLED_NVIDIA_PIPELINE.probe()
             if available:
                 try:
