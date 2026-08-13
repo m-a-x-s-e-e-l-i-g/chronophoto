@@ -12,6 +12,11 @@ platform_icons = {
     "darwin": project_root / "packaging" / "macos" / "chronophoto.icns",
 }
 platform_icon = platform_icons.get(sys.platform)
+datas = [(str(package_root / "assets"), "chronophoto/assets")]
+if sys.platform == "win32":
+    nvidia_runtime = project_root / "build" / "vendor-python312" / "runtime"
+    if nvidia_runtime.is_dir():
+        datas.append((str(nvidia_runtime), "nvidia-runtime"))
 with (project_root / "pyproject.toml").open("rb") as project_file:
     project_version = tomllib.load(project_file)["project"]["version"]
 
@@ -19,7 +24,7 @@ a = Analysis(
     [str(package_root / "__main__.py")],
     pathex=[str(project_root / "src")],
     binaries=[],
-    datas=[(str(package_root / "assets"), "chronophoto/assets")],
+    datas=datas,
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

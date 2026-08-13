@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
-from bisect import bisect_left
+from bisect import bisect_left, bisect_right
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from time import monotonic
 
 import numpy as np
 from PIL import Image, ImageOps
@@ -51,6 +52,7 @@ from chronophoto.processing import (
     compose_sequence,
     load_image_sequence,
     load_video_sequence,
+    nvidia_acceleration_setup,
     order_image_paths,
     read_preset,
     render_motion_trail_sequence,
@@ -92,6 +94,8 @@ from chronophoto.updates import (
     evaluate_release,
 )
 
+NVIDIA_SETUP_URL = f"{GITHUB_REPOSITORY_URL}#optional-nvidia-gpu-acceleration"
+
 
 @dataclass(slots=True)
 class VideoAnalysisCache:
@@ -124,6 +128,7 @@ class ChronophotoWindow(QMainWindow):
         self.preview_frames: list[np.ndarray] = []
         self.preview_masks: list[np.ndarray] = []
         self.preview_labels: list[str] = []
+        self.preview_timestamps: list[float] = []
         self.preview_trail_frames: list[np.ndarray] = []
         self.preview_trail_timestamps: list[float] = []
         self._preview_cache_key: tuple[object, ...] | None = None
@@ -156,10 +161,14 @@ class ChronophotoWindow(QMainWindow):
         self.effect_preview_throttle.setInterval(160)
         self.effect_preview_throttle.timeout.connect(self.render_preview)
         self.playback_timer = QTimer(self)
-        self.playback_timer.setInterval(180)
+        self.playback_timer.setTimerType(Qt.TimerType.PreciseTimer)
+        self.playback_timer.setInterval(16)
         self.playback_timer.timeout.connect(self._advance_pose)
+        self._playback_started_at = 0.0
+        self._playback_start_timestamp = 0.0
 
         self._build_ui()
+        self._refresh_acceleration_setup()
         self._connect_preset_tracking()
         self._build_shortcuts()
         self._set_loaded_state(False)
@@ -221,6 +230,7 @@ class ChronophotoWindow(QMainWindow):
         root_layout.setContentsMargins(0, 0, 0, 0)
         root_layout.setSpacing(0)
         root_layout.addWidget(self._build_header())
+        root_layout.addWidget(self._build_acceleration_notice())
 
         self.body_splitter = QSplitter(Qt.Orientation.Horizontal)
         self.body_splitter.setObjectName("bodySplitter")
@@ -248,6 +258,25 @@ class ChronophotoWindow(QMainWindow):
         drop_layout.addWidget(self.drop_overlay_title)
         drop_layout.addWidget(drop_hint)
         self.drop_overlay.hide()
+
+    def _build_acceleration_notice(self) -> QWidget:
+        self.nvidia_setup_notice = QFrame()
+        self.nvidia_setup_notice.setObjectName("nvidiaSetupNotice")
+        setup_layout = QHBoxLayout(self.nvidia_setup_notice)
+        setup_layout.setContentsMargins(20, 9, 20, 9)
+        setup_layout.setSpacing(12)
+        self.nvidia_setup_text = QLabel()
+        self.nvidia_setup_text.setObjectName("nvidiaSetupText")
+        self.nvidia_setup_text.setWordWrap(True)
+        self.nvidia_setup_text.setAccessibleName("NVIDIA acceleration setup status")
+        self.nvidia_setup_button = QPushButton("LEARN MORE")
+        self.nvidia_setup_button.setObjectName("nvidiaSetupButton")
+        self.nvidia_setup_button.setAccessibleName("Learn about optional NVIDIA acceleration")
+        self.nvidia_setup_button.clicked.connect(self._open_nvidia_setup)
+        setup_layout.addWidget(self.nvidia_setup_text, 1)
+        setup_layout.addWidget(self.nvidia_setup_button)
+        self.nvidia_setup_notice.hide()
+        return self.nvidia_setup_notice
 
     def _build_header(self) -> QWidget:
         header = QFrame()
@@ -543,6 +572,7 @@ class ChronophotoWindow(QMainWindow):
         self.pose_scrubber = ScrollSafeSlider(Qt.Orientation.Horizontal)
         self.pose_scrubber.setRange(0, 0)
         self.pose_scrubber.setAccessibleName("Previewed pose")
+        self.pose_scrubber.sliderPressed.connect(self._stop_playback)
         self.pose_scrubber.valueChanged.connect(self._refresh_preview_canvas)
         self.pose_position = QLabel("0 / 0")
         self.pose_position.setObjectName("timecode")
@@ -672,6 +702,30 @@ class ChronophotoWindow(QMainWindow):
         telemetry_row.addWidget(self.copy_diagnostics_button)
         layout.addLayout(telemetry_row)
         return panel
+
+    def _refresh_acceleration_setup(self) -> None:
+        setup = nvidia_acceleration_setup()
+        if not setup.gpu_detected:
+            self.nvidia_setup_notice.hide()
+            return
+        if setup.ready:
+            self.nvidia_setup_text.setText(
+                "NVIDIA GPU acceleration is ready and will be selected automatically."
+            )
+            self.nvidia_setup_text.setToolTip(setup.detail)
+            self.nvidia_setup_button.hide()
+            self.nvidia_setup_notice.show()
+            return
+        self.nvidia_setup_button.show()
+        self.nvidia_setup_text.setText(
+            "NVIDIA GPU detected. Optional native GPU rendering is not available in this build."
+        )
+        self.nvidia_setup_text.setToolTip(setup.detail)
+        self.nvidia_setup_notice.show()
+
+    @Slot()
+    def _open_nvidia_setup(self) -> None:
+        QDesktopServices.openUrl(QUrl(NVIDIA_SETUP_URL))
 
     def _build_inspector(self) -> QWidget:
         scroll = QScrollArea()
@@ -1369,6 +1423,7 @@ class ChronophotoWindow(QMainWindow):
         self.preview_frames = []
         self.preview_masks = []
         self.preview_labels = []
+        self.preview_timestamps = []
         self.preview_trail_frames = []
         self.preview_trail_timestamps = []
         self._preview_cache_key = None
@@ -1381,7 +1436,7 @@ class ChronophotoWindow(QMainWindow):
         self._last_export_path = None
         self.open_export_button.hide()
         self.range_slider.set_thumbnails([])
-        self.playback_timer.stop()
+        self._stop_playback()
 
     def _preview_quality_key(self) -> str:
         key = str(self.preview_quality.currentData())
@@ -1919,6 +1974,7 @@ class ChronophotoWindow(QMainWindow):
                 )
                 timeline_frames = [video_cache.frames[int(index)] for index in thumbnail_indices]
             labels = sequence.labels
+            source_timestamps: list[float] = []
             trail_frames: list[np.ndarray] = []
             trail_timestamps: list[float] = []
             if request.kind == "video":
@@ -1962,6 +2018,7 @@ class ChronophotoWindow(QMainWindow):
                     if sequence.timestamps is not None
                     else None
                 )
+                source_timestamps = list(selected_timestamps or [])
                 selected_cache = analysis_cache.compose_cache.select(selected_source_indices)
                 compose_start = 70 if analysis_was_built else 40
                 compose_end = 75 if render_trail else 100
@@ -2001,13 +2058,7 @@ class ChronophotoWindow(QMainWindow):
                     motion_frames = [analysis_cache.frames[index] for index in trail_source_indices]
                     motion_cache = analysis_cache.compose_cache.select(trail_source_indices)
                     motion_timestamps = list(motion_sequence.timestamps)
-                    preview_indices = np.linspace(
-                        0,
-                        len(motion_frames) - 1,
-                        min(60, len(motion_frames)),
-                        dtype=int,
-                    ).tolist()
-                    preview_indices = list(dict.fromkeys(preview_indices))
+                    preview_indices = list(range(len(motion_frames)))
                     trail_timestamps = [motion_timestamps[index] for index in preview_indices]
                     trail_frames = render_motion_trail_sequence(
                         motion_frames,
@@ -2056,6 +2107,7 @@ class ChronophotoWindow(QMainWindow):
                 "masks": masks,
                 "frames": aligned,
                 "labels": labels,
+                "timestamps": source_timestamps,
                 "sequence": sequence,
                 "cache_key": request.cache_key,
                 "video_cache_sequence": video_cache,
@@ -2087,10 +2139,12 @@ class ChronophotoWindow(QMainWindow):
         if data["revision"] != self._preview_revision:
             self._pending_preview = True
             return
+        self._stop_playback()
         self.preview_result = data["result"]
         self.preview_masks = data["masks"]
         self.preview_frames = data["frames"]
         self.preview_labels = data["labels"]
+        self.preview_timestamps = data["timestamps"]
         self.preview_trail_frames = data["trail_frames"]
         self.preview_trail_timestamps = data["trail_timestamps"]
         self._preview_cache_sequence = data["sequence"]
@@ -2970,12 +3024,11 @@ class ChronophotoWindow(QMainWindow):
             self.pose_scrubber.setValue(min(self.pose_scrubber.value(), maximum))
 
     def _set_preview_mode(self, mode: str) -> None:
+        if self.playback_timer.isActive():
+            self._stop_playback()
         button = self.preview_mode_buttons.get(mode)
         if button:
             button.setChecked(True)
-        if mode == "composite":
-            self.playback_timer.stop()
-            self.play_button.setText("Play")
         self._sync_preview_navigation()
         self._refresh_preview_canvas()
         if (
@@ -3041,19 +3094,56 @@ class ChronophotoWindow(QMainWindow):
         if self._current_preview_mode() == "composite":
             self._set_preview_mode("source")
         if self.playback_timer.isActive():
-            self.playback_timer.stop()
-            self.play_button.setText("Play")
+            self._stop_playback()
         else:
-            if self._current_preview_mode() == "trail" and len(self.preview_trail_timestamps) > 1:
-                deltas = np.diff(self.preview_trail_timestamps)
-                positive_deltas = deltas[deltas > 0]
-                if positive_deltas.size:
-                    interval = round(float(np.median(positive_deltas)) * 1_000)
-                    self.playback_timer.setInterval(max(16, min(500, interval)))
-            else:
-                self.playback_timer.setInterval(180)
-            self.playback_timer.start()
-            self.play_button.setText("Pause")
+            self._start_playback()
+
+    def _stop_playback(self) -> None:
+        self.playback_timer.stop()
+        if hasattr(self, "play_button"):
+            self.play_button.setText("Play")
+
+    def _active_playback_timestamps(self) -> list[float]:
+        mode = self._current_preview_mode()
+        frames = self.preview_trail_frames if mode == "trail" else self.preview_frames
+        timestamps = (
+            self.preview_trail_timestamps if mode == "trail" else self.preview_timestamps
+        )
+        if len(timestamps) == len(frames) and len(timestamps) > 1:
+            return timestamps
+        if (
+            len(frames) > 1
+            and self.source
+            and self.source.kind == "video"
+            and self.source.video_info
+            and self.source.video_info.frame_rate > 0
+        ):
+            frame_period = 1.0 / self.source.video_info.frame_rate
+            return [index * frame_period for index in range(len(frames))]
+        return []
+
+    def _playback_frame_period(self, timestamps: list[float]) -> float:
+        if len(timestamps) > 1:
+            deltas = np.diff(timestamps)
+            positive_deltas = deltas[deltas > 0]
+            if positive_deltas.size:
+                return float(np.median(positive_deltas))
+        if self.source and self.source.video_info and self.source.video_info.frame_rate > 0:
+            return 1.0 / self.source.video_info.frame_rate
+        return 0.18
+
+    def _start_playback(self) -> None:
+        timestamps = self._active_playback_timestamps()
+        if timestamps:
+            position = min(self.pose_scrubber.value(), len(timestamps) - 1)
+            self._playback_start_timestamp = timestamps[position]
+            frame_period = self._playback_frame_period(timestamps)
+            self.playback_timer.setInterval(max(4, min(16, round(frame_period * 500))))
+        else:
+            self.playback_timer.setInterval(180)
+        self._playback_started_at = monotonic()
+        self.playback_timer.start()
+        self.play_button.setText("Pause")
 
     def _advance_pose(self) -> None:
         frame_count = (
@@ -3062,9 +3152,23 @@ class ChronophotoWindow(QMainWindow):
             else len(self.preview_frames)
         )
         if not frame_count:
-            self.playback_timer.stop()
+            self._stop_playback()
             return
-        self.pose_scrubber.setValue((self.pose_scrubber.value() + 1) % frame_count)
+        timestamps = self._active_playback_timestamps()
+        if not timestamps:
+            self.pose_scrubber.setValue((self.pose_scrubber.value() + 1) % frame_count)
+            return
+        frame_period = self._playback_frame_period(timestamps)
+        first_timestamp = timestamps[0]
+        cycle_duration = max(frame_period, timestamps[-1] - first_timestamp + frame_period)
+        elapsed = max(0.0, monotonic() - self._playback_started_at)
+        cycle_offset = (
+            self._playback_start_timestamp - first_timestamp + elapsed
+        ) % cycle_duration
+        target_timestamp = first_timestamp + min(cycle_offset, timestamps[-1] - first_timestamp)
+        position = max(0, bisect_right(timestamps, target_timestamp) - 1)
+        if position != self.pose_scrubber.value():
+            self.pose_scrubber.setValue(position)
 
     def _open_export_folder(self) -> None:
         if self._last_export_path:

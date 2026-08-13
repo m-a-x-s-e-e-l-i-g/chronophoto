@@ -18,6 +18,8 @@ echo Installing build tools...
 if errorlevel 1 exit /b %errorlevel%
 
 echo Building Chronophoto...
+powershell -NoProfile -ExecutionPolicy Bypass -File "scripts\build_nvidia_runtime.ps1"
+if errorlevel 1 exit /b %errorlevel%
 ".venv\Scripts\python.exe" -m PyInstaller --noconfirm --clean chronophoto.spec
 if errorlevel 1 exit /b %errorlevel%
 

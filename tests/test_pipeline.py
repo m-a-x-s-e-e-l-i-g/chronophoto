@@ -77,6 +77,11 @@ def test_streaming_trail_export_bounds_live_window_as_clip_grows(
             output.mux(packet)
 
     monkeypatch.setattr(
+        motion_video_module.BUNDLED_NVIDIA_PIPELINE,
+        "probe",
+        lambda: (False, "disabled for CPU regression"),
+    )
+    monkeypatch.setattr(
         motion_video_module,
         "_video_encoder_candidates",
         lambda _width, _height: (

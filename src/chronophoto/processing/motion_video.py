@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -29,6 +30,7 @@ from chronophoto.processing.compositor import (
 )
 from chronophoto.processing.effects import apply_background_effect_tracks, apply_effect_tracks
 from chronophoto.processing.exports import _IncrementalAlphaCompositor, _iter_transparent_poses
+from chronophoto.processing.nvidia_backend import BUNDLED_NVIDIA_PIPELINE
 from chronophoto.processing.parallel import export_render_workers, ordered_parallel_map
 from chronophoto.processing.pipeline import RenderPlan, RenderStage, StageArtifact
 from chronophoto.processing.sources import iter_video_frames, load_video_sequence
@@ -56,8 +58,8 @@ class _TrailPoseLayer:
 
 @dataclass(slots=True, frozen=True)
 class _StreamingSetup:
-    background: ImageArray
-    reference: ImageArray
+    background: ImageArray | None
+    reference: ImageArray | None
     width: int
     height: int
     expected_frames: int
@@ -637,6 +639,21 @@ def write_streaming_motion_trail_video(
     expected_frames = max(2, round((end - start) * frame_rate))
 
     def sample_stage(_dependencies, stage_progress):  # type: ignore[no-untyped-def]
+        with av.open(str(source)) as container:
+            video_stream = container.streams.video[0]
+            source_width = int(video_stream.codec_context.width)
+            source_height = int(video_stream.codec_context.height)
+        gpu_supported = BUNDLED_NVIDIA_PIPELINE.supports(
+            settings, alignment, source_width, source_height
+        )
+        gpu_available, _reason = BUNDLED_NVIDIA_PIPELINE.probe()
+        if gpu_supported and gpu_available:
+            return StageArtifact(
+                "streaming_setup",
+                _StreamingSetup(None, None, source_width, source_height, expected_frames),
+                ("nvidia_streaming_setup", source, start, end),
+                metadata={"gpu": True},
+            )
         sample_count = min(CLEAN_PLATE_MAX_FRAMES, expected_frames)
         sequence = load_video_sequence(
             source,
@@ -666,6 +683,49 @@ def write_streaming_motion_trail_video(
         setup = dependencies["clean_plate"].value
         if not isinstance(setup, _StreamingSetup):
             raise TypeError("clean plate stage returned an invalid setup")
+        if BUNDLED_NVIDIA_PIPELINE.supports(
+            settings, alignment, setup.width, setup.height
+        ):
+            available, reason = BUNDLED_NVIDIA_PIPELINE.probe()
+            if available:
+                try:
+                    telemetry = BUNDLED_NVIDIA_PIPELINE.render_silent(
+                        silent_path,
+                        source,
+                        settings,
+                        start=start,
+                        end=end,
+                        frame_rate=frame_rate,
+                        trail_duration=trail_duration,
+                        progress=stage_progress,
+                    )
+                    return StageArtifact(
+                        "encoded_video",
+                        (silent_path, telemetry),
+                        (),
+                        telemetry.estimated_peak_bytes,
+                        {"encoder": telemetry.encoder},
+                    )
+                except (OSError, RuntimeError, subprocess.SubprocessError) as exc:
+                    if exc.__class__.__name__ == "TaskCancelled":
+                        raise
+                    silent_path.unlink(missing_ok=True)
+                    if stage_progress is not None:
+                        stage_progress(0, f"NVIDIA GPU unavailable; using CPU renderer: {exc}")
+            elif stage_progress is not None:
+                stage_progress(0, f"Using CPU renderer: {reason}")
+        if setup.background is None or setup.reference is None:
+            sample_count = min(CLEAN_PLATE_MAX_FRAMES, expected_frames)
+            sequence = load_video_sequence(source, start, end, sample_count)
+            aligned_samples = align_sequence(sequence.frames, alignment)
+            background = build_background(aligned_samples, settings.background)
+            setup = _StreamingSetup(
+                background,
+                sequence.frames[0],
+                background.shape[1],
+                background.shape[0],
+                expected_frames,
+            )
         candidates = _video_encoder_candidates(setup.width, setup.height)
         last_error: Exception | None = None
         for position, encoder in enumerate(candidates):
@@ -771,6 +831,8 @@ def _write_streaming_silent_video(
     decoder_label: str,
     progress: ProgressCallback | None,
 ) -> RenderTelemetry:
+    if setup.background is None or setup.reference is None:
+        raise ValueError("CPU streaming renderer requires materialized clean-plate frames")
     rate = Fraction(frame_rate).limit_denominator(1001)
     time_base = Fraction(1, 90_000)
     aligner = FrameAligner(setup.reference, alignment)

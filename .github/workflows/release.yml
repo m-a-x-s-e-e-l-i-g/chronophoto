@@ -45,6 +45,9 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
         run: python -m pytest -q
+      - name: Build bundled NVIDIA runtime
+        shell: pwsh
+        run: ./scripts/build_nvidia_runtime.ps1
       - name: Build application
         run: python -m PyInstaller --noconfirm --clean chronophoto.spec
       - name: Smoke test frozen application
