@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -65,6 +66,40 @@ class CompleteHardwareVideoPipeline(Protocol):
 _COMPLETE_HARDWARE_PIPELINES: list[CompleteHardwareVideoPipeline] = []
 
 
+@dataclass(slots=True, frozen=True)
+class NvidiaAccelerationSetup:
+    gpu_detected: bool
+    ready: bool
+    detail: str
+
+
+def _nvidia_device_count() -> int:
+    """Ask the NVIDIA driver directly; codec presence does not prove GPU hardware."""
+
+    library_name = "nvcuda.dll" if sys.platform == "win32" else "libcuda.so.1"
+    try:
+        cuda = ctypes.CDLL(library_name)
+        if cuda.cuInit(0) != 0:
+            return 0
+        count = ctypes.c_int()
+        if cuda.cuDeviceGetCount(ctypes.byref(count)) != 0:
+            return 0
+        return max(0, count.value)
+    except (AttributeError, OSError):
+        return 0
+
+
+def nvidia_acceleration_setup() -> NvidiaAccelerationSetup:
+    """Report whether the optional qualified native NVIDIA backend is available."""
+
+    if _nvidia_device_count() < 1:
+        return NvidiaAccelerationSetup(False, False, "No NVIDIA CUDA GPU detected")
+    from chronophoto.processing.nvidia_backend import BUNDLED_NVIDIA_PIPELINE
+
+    ready, detail = BUNDLED_NVIDIA_PIPELINE.probe()
+    return NvidiaAccelerationSetup(True, ready, detail)
+
+
 def register_complete_hardware_pipeline(backend: CompleteHardwareVideoPipeline) -> None:
     """Register an optional backend only when it implements the full contract."""
 
@@ -110,7 +145,7 @@ def probe_video_pipeline(source_path: str | Path) -> VideoPipelineCapabilities:
         encoder = "NVIDIA NVENC"
         if _codec_available("h264_cuvid", "r") or _codec_available("hevc_cuvid", "r"):
             hardware_decode_candidate = "NVIDIA CUVID"
-        reason = "CUDA decode and NVENC exist, but no zero-copy CUDA compositor is registered"
+        reason = "CUDA decode and NVENC exist, but no native zero-copy CUDA backend is bundled"
     return VideoPipelineCapabilities(
         platform=sys.platform,
         decoder=f"FFmpeg {decoder} (CPU frames)",

@@ -415,6 +415,32 @@ frame analysis, masking, alignment, and compositing. Pillow writes the final
 image files.
 A separate FFmpeg installation is not required.
 
+### Optional NVIDIA GPU acceleration
+
+Chronophoto detects an NVIDIA CUDA GPU automatically. If the optional native
+backend is unavailable, the startup banner offers **LEARN MORE**. Windows builds
+bundle their own Python 3.12, CUDA runtime, CuPy kernels, and PyNvVideoCodec;
+users do not install Python, CUDA, or GPU packages. Supported motion-trail
+exports select the backend automatically:
+
+```text
+NVDEC device surfaces → CUDA masks/effects/compositor → NVENC device surfaces
+```
+
+Decoded NV12 surfaces stay in device memory through fused CUDA masking,
+morphology, feathering, rolling alpha composition, color conversion, and NVENC.
+The main application only receives progress and the encoded H.264 stream.
+Unsupported effects, alignment, odd frame dimensions, runtime failures, or
+unsupported hardware choose the existing CPU/NVENC route before rendering (or
+retry safely after an unexpected worker failure).
+
+The initial real-hardware qualification uses the 4K `sample-01.mp4` fixture on
+a Pascal GTX 1050 Ti. The fused route rendered 30 frames at 19.01 fps versus
+2.05 fps for the CPU reference (9.3×). Against the CPU reference image, mean
+absolute channel error was 1.597 levels and 98.07% of channel values were within
+8 levels. Those tolerances and a minimum 1.2× speedup are encoded as activation
+gates. The portable CPU renderer remains supported.
+
 All processing code is kept independent from the Qt interface so future mask
 modes can share the same source, cache, preview, and export pipeline.
 
@@ -510,8 +536,8 @@ macOS, and Linux. The **Build release** workflow produces all desktop packages
 when it is started manually or when a matching version tag is pushed.
 
 ```bash
-git tag v0.5.0
-git push origin v0.5.0
+git tag v0.6.0
+git push origin v0.6.0
 ```
 
 The tag must match `project.version` in `pyproject.toml`. Tagged builds publish
@@ -564,10 +590,9 @@ manifest metadata.
   future work.
 - Solid is the current trail renderer; the style selector remains hidden until
   a second functional choice exists.
-- A complete hardware decode → GPU composite → hardware encode backend is not
-  bundled yet. Chronophoto only activates such a backend when it registers the
-  full zero-copy contract; partial decode/encode acceleration stays on the
-  measured CPU-compositor path.
+- Windows builds bundle a qualified NVIDIA decode → CUDA composite → NVENC
+  backend for the common solid-trail route. Unsupported settings automatically
+  stay on the measured CPU compositor and accelerated-encode path.
 - Release automation exists, but production signing and notarization still need
   platform credentials and policy decisions.
 

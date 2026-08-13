@@ -24,6 +24,7 @@ from PySide6.QtCore import (  # noqa: E402
 from PySide6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QImage, QWheelEvent  # noqa: E402
 from PySide6.QtWidgets import QApplication, QSlider  # noqa: E402
 
+import chronophoto.ui.window as window_module  # noqa: E402
 from chronophoto import __version__  # noqa: E402
 from chronophoto.app import application_stylesheet, main  # noqa: E402
 from chronophoto.processing import (  # noqa: E402
@@ -32,6 +33,7 @@ from chronophoto.processing import (  # noqa: E402
     ComposeSettings,
     EffectKeyframe,
     EffectTrack,
+    NvidiaAccelerationSetup,
     ResolvePackageResult,
     read_preset,
 )
@@ -60,6 +62,55 @@ def test_application_icon_asset_is_valid() -> None:
 
     assert icon_path.is_file()
     assert not icon.isNull()
+
+
+def test_nvidia_setup_notice_names_missing_requirements(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(
+        window_module,
+        "nvidia_acceleration_setup",
+        lambda: NvidiaAccelerationSetup(
+            True,
+            False,
+            "native backend not bundled",
+        ),
+    )
+
+    window = ChronophotoWindow()
+
+    assert not window.nvidia_setup_notice.isHidden()
+    assert "Optional native GPU rendering is not available" in window.nvidia_setup_text.text()
+    assert window.nvidia_setup_button.text() == "LEARN MORE"
+
+
+def test_nvidia_setup_action_opens_installation_guide(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    opened: list[str] = []
+    monkeypatch.setattr(
+        window_module.QDesktopServices,
+        "openUrl",
+        lambda url: opened.append(url.toString()),
+    )
+    _app = QApplication.instance() or QApplication([])
+    window = ChronophotoWindow()
+
+    window._open_nvidia_setup()
+
+    assert opened == [window_module.NVIDIA_SETUP_URL]
+
+
+def test_ready_nvidia_backend_is_announced_at_startup(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(
+        window_module,
+        "nvidia_acceleration_setup",
+        lambda: NvidiaAccelerationSetup(True, True, "qualified 9.3x"),
+    )
+
+    window = ChronophotoWindow()
+
+    assert not window.nvidia_setup_notice.isHidden()
+    assert "selected automatically" in window.nvidia_setup_text.text()
+    assert window.nvidia_setup_button.isHidden()
 
 
 def test_complete_preset_file_restores_controls_effect_stacks_and_outputs(
@@ -894,6 +945,103 @@ def test_trail_preview_mode_uses_rendered_video_frames() -> None:
     assert window.preview_canvas._status.startswith("TRAIL · 00:00.75")
     assert window.preview_canvas._image is not None
     assert window.preview_canvas._image.pixelColor(0, 0).red() == 120
+    window.close()
+
+
+def test_source_playback_uses_video_timestamps_and_skips_late_frames(monkeypatch) -> None:
+    _app = QApplication.instance() or QApplication([])
+    clock = [100.0]
+    monkeypatch.setattr(window_module, "monotonic", lambda: clock[0])
+    window = ChronophotoWindow()
+    path = Path("clip.mp4")
+    frame_rate = 29.97
+    window.source = SourceState("video", [path], VideoInfo(path, 1.0, 40, 24, frame_rate, 6))
+    window._set_loaded_state(True)
+    window.preview_frames = [np.full((24, 40, 3), index * 20, dtype=np.uint8) for index in range(6)]
+    window.preview_timestamps = [5.0 + index / frame_rate for index in range(6)]
+    window._set_preview_mode("source")
+
+    window._toggle_playback()
+    clock[0] += 3.1 / frame_rate
+    window._advance_pose()
+
+    assert window.playback_timer.isActive()
+    assert window.playback_timer.interval() <= 16
+    assert window.pose_scrubber.value() == 3
+
+    clock[0] += 3.0 / frame_rate
+    window._advance_pose()
+
+    assert window.pose_scrubber.value() == 0
+    window.close()
+
+
+def test_trail_playback_uses_rendered_frame_timestamps(monkeypatch) -> None:
+    _app = QApplication.instance() or QApplication([])
+    clock = [50.0]
+    monkeypatch.setattr(window_module, "monotonic", lambda: clock[0])
+    window = ChronophotoWindow()
+    path = Path("clip.mp4")
+    window.source = SourceState("video", [path], VideoInfo(path, 1.0, 40, 24, 30.0, 30))
+    window._set_loaded_state(True)
+    window.preview_trail_frames = [
+        np.full((24, 40, 3), index * 40, dtype=np.uint8) for index in range(5)
+    ]
+    window.preview_trail_timestamps = [2.0, 2.04, 2.08, 2.12, 2.16]
+    window._set_preview_mode("trail")
+
+    window._toggle_playback()
+    clock[0] += 0.125
+    window._advance_pose()
+
+    assert window.pose_scrubber.value() == 3
+    assert window.preview_canvas._status.startswith("TRAIL · 00:02.12")
+    window.close()
+
+
+def test_trail_preview_prerenders_every_source_frame(monkeypatch) -> None:
+    app = QApplication.instance() or QApplication([])
+    window = ChronophotoWindow()
+    path = Path("cached-clip.mp4")
+    frame_count = 75
+    frame_rate = 30.0
+    info = VideoInfo(path, frame_count / frame_rate, 40, 24, frame_rate, frame_count)
+    window.source = SourceState("video", [path], info)
+    window._set_loaded_state(True)
+    window.range_slider.set_values(0, 1_000)
+    window.preview_debounce.stop()
+    frames = [np.full((24, 40, 3), index % 255, dtype=np.uint8) for index in range(frame_count)]
+    timestamps = [index / frame_rate for index in range(frame_count)]
+    cached = MediaSequence(
+        frames,
+        [f"frame {index}" for index in range(frame_count)],
+        (40, 24),
+        timestamps,
+    )
+    request = window._render_request(window._preview_max_dimension())
+    window._video_preview_cache_key = request.video_cache_key
+    window._video_preview_cache_sequence = cached
+    window.preview_mode_buttons["trail"].setChecked(True)
+    rendered_indices: list[int] = []
+
+    def fake_trail_render(frames, *args, frame_indices, **kwargs):  # type: ignore[no-untyped-def]
+        del args, kwargs
+        rendered_indices.extend(frame_indices)
+        return [frames[index] for index in frame_indices]
+
+    monkeypatch.setattr(window_module, "render_motion_trail_sequence", fake_trail_render)
+
+    window.render_preview()
+    deadline = monotonic() + 5
+    while window._task_active("preview") and monotonic() < deadline:
+        app.processEvents()
+        sleep(0.01)
+
+    assert not window._task_active("preview")
+    assert rendered_indices == list(range(frame_count))
+    assert len(window.preview_trail_frames) == frame_count
+    assert window.preview_trail_timestamps == timestamps
+    assert window.preview_timestamps == timestamps
     window.close()
 
 

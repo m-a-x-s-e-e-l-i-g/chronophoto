@@ -1,8 +1,10 @@
 from chronophoto.processing.alignment import align_sequence
 from chronophoto.processing.backends import (
     CompleteHardwareVideoPipeline,
+    NvidiaAccelerationSetup,
     RenderTelemetry,
     VideoPipelineCapabilities,
+    nvidia_acceleration_setup,
     probe_video_pipeline,
     register_complete_hardware_pipeline,
     select_complete_hardware_pipeline,
@@ -87,6 +89,7 @@ __all__ = [
     "ComposeCache",
     "ComposeSettings",
     "CompleteHardwareVideoPipeline",
+    "NvidiaAccelerationSetup",
     "ChronophotoPreset",
     "EFFECT_DEFAULT_AMOUNTS",
     "EFFECT_KINDS",
@@ -119,6 +122,7 @@ __all__ = [
     "load_video_thumbnails",
     "motion_trail_window",
     "neutral_effect_track",
+    "nvidia_acceleration_setup",
     "order_image_paths",
     "ordered_parallel_map",
     "preset_from_dict",

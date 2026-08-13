@@ -104,6 +104,29 @@ QLabel#bodyMuted, QLabel#controlHint {
     color: #858585;
     font-size: 12px;
 }
+QFrame#nvidiaSetupNotice {
+    background: #181818;
+    border-top: 1px solid #4b4b4b;
+    border-bottom: 1px solid #4b4b4b;
+}
+QLabel#nvidiaSetupText {
+    color: #d2d2d2;
+    font-size: 11px;
+}
+QPushButton#nvidiaSetupButton {
+    min-height: 28px;
+    background: #dedede;
+    color: #111111;
+    border: 1px solid #dedede;
+    padding: 0 9px;
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 0.7px;
+}
+QPushButton#nvidiaSetupButton:hover, QPushButton#nvidiaSetupButton:focus {
+    background: #f0f0f0;
+    border-color: #f0f0f0;
+}
 QLabel#privacyNote {
     color: #737373;
     font-size: 11px;
