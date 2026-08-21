@@ -82,6 +82,12 @@ from chronophoto.processing.sources import (
     order_image_paths,
     select_video_sequence,
 )
+from chronophoto.processing.spacetime import (
+    TimeSurface,
+    sample_time_surface,
+    silhouette_edge_stretch,
+    slice_video_volume,
+)
 
 __all__ = [
     "BLEND_MODE_LABELS",
@@ -148,4 +154,8 @@ __all__ = [
     "write_preset",
     "write_resolve_package",
     "write_selected_audio",
+    "TimeSurface",
+    "sample_time_surface",
+    "silhouette_edge_stretch",
+    "slice_video_volume",
 ]

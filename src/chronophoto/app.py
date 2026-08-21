@@ -7,7 +7,7 @@ from PySide6.QtGui import QFont, QFontDatabase, QIcon
 from PySide6.QtWidgets import QApplication
 
 from chronophoto import __version__
-from chronophoto.ui.window import ChronophotoWindow
+from chronophoto.ui.launcher import EffectLauncher
 
 STYLESHEET = """
 QWidget {
@@ -536,6 +536,15 @@ QToolTip {
     border: 1px solid #555555;
     padding: 6px;
 }
+QWidget#launcher { background: #090909; }
+QLabel#launcherTitle { color: #f2f2f2; font-size: 38px; font-weight: 700; }
+QFrame#effectCard {
+    background: #111111;
+    border: 1px solid #393939;
+    border-radius: 3px;
+}
+QFrame#effectCard:hover { background: #151515; border-color: #777777; }
+QLabel#effectCardTitle { color: #eeeeee; font-size: 21px; font-weight: 700; }
 """
 
 
@@ -585,7 +594,7 @@ def main() -> int:
     fixed_font = QFont(font_family, 10)
     app.setFont(fixed_font)
     app.setStyleSheet(application_stylesheet(font_family))
-    window = ChronophotoWindow(check_updates=True)
+    window = EffectLauncher(check_updates=True)
     window.show()
     return app.exec()
 

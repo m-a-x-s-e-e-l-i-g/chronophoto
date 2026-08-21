@@ -45,6 +45,24 @@ become a photograph, an animation, or a set of editable layers.
 > Your media stays on your computer. There is no footage upload or cloud render.
 > The optional release update check contacts GitHub without sending media.
 
+## Choose an effect workspace
+
+Chronophoto now opens on an effect library instead of assuming every project is
+a Photostack. Each choice has its own source, preview, controls, and export flow:
+
+- **Photostack** keeps the complete motion-photo and motion-trail interface.
+- **Silhouette Edge Stretch** detects a subject against the first video frame,
+  samples the mask boundary per scanline, and extrudes those edge pixels left,
+  right, up, down, or in both directions. Stretch length, mask sensitivity, and
+  edge fade are editable with a live preview.
+- **Video Volume** loads the complete clip as an **X × Y × Time** volume and
+  exposes XY, XT, YT, spatial-diagonal-through-time, and arbitrary
+  `t = f(x, y)` surface slices. Time surfaces can be tilted on both spatial axes
+  and animated before exporting a still slice.
+
+Close any workspace to return to the effect library and start a different kind
+of project.
+
 ## Three decisions, then export
 
 ### 1. Bring in the action

@@ -39,6 +39,7 @@ from chronophoto.processing import (  # noqa: E402
 )
 from chronophoto.processing.sources import MediaSequence, VideoInfo  # noqa: E402
 from chronophoto.ui.effects import EffectKeyframeGraph  # noqa: E402
+from chronophoto.ui.launcher import EffectLauncher, ExperimentalEffectWindow  # noqa: E402
 from chronophoto.ui.widgets import (  # noqa: E402
     PreviewCanvas,
     ScrollSafeComboBox,
@@ -53,6 +54,28 @@ def test_version_cli_does_not_start_the_event_loop(monkeypatch, capsys) -> None:
 
     assert main() == 0
     assert capsys.readouterr().out.strip() == f"Chronophoto {__version__}"
+
+
+def test_launcher_offers_three_separate_effect_workflows() -> None:
+    _app = QApplication.instance() or QApplication([])
+    launcher = EffectLauncher()
+
+    cards = launcher.findChildren(window_module.QFrame, "effectCard")
+
+    assert len(cards) == 3
+    assert "What do you want to make?" in launcher.centralWidget().findChild(
+        window_module.QLabel, "launcherTitle"
+    ).text()
+
+
+def test_experimental_workspaces_have_corresponding_controls() -> None:
+    _app = QApplication.instance() or QApplication([])
+    edge = ExperimentalEffectWindow("edge")
+    volume = ExperimentalEffectWindow("volume")
+
+    assert edge.mode.count() == 6
+    assert volume.mode.count() == 5
+    assert volume.mode.findData("surface") >= 0
 
 
 def test_application_icon_asset_is_valid() -> None:
